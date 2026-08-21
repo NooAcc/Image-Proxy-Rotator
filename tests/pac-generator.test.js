@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { generatePac, pacSummary } from '../src/lib/pac-generator.js';
 import { loadPac } from './helpers/pac-sandbox.js';
 import { PROBE_PARAM } from '../src/lib/constants.js';
+import { isAscii } from '../src/lib/ascii.js';
 
 const node = (id, o = {}) => ({
   id, name: id, protocol: 'http', host: id + '.px', port: 8080, username: '', password: '',
@@ -258,4 +259,80 @@ test('规则列表为空时一律 DIRECT（不会误代理全部流量）', () =
   const pac = loadPac(generatePac(cfg({ rules: [] }), {}));
   assert.equal(pac.find(...MANGA), 'DIRECT');
   assert.equal(pac.find('https://any.site/x', 'any.site'), 'DIRECT');
+});
+
+// ---------------------------------------------------------------- ASCII 硬约束
+//
+// chrome.proxy 只接受纯 ASCII 的 pacScript.data：出现一个非 ASCII 字节，
+// settings.set() 就整体抛「'pacScript.data' supports only ASCII code
+// (encode URLs in Punycode format).」，一条 PAC 都注入不进去。而失败后浏览器照旧
+// 直连，图片照样加载 —— 所以这个故障的表现是「扩展安静地什么都没做」。
+// 下面这几条断言就是防止它复发的唯一屏障。
+
+/** 把中文塞进每一个能塞的角落的对抗配置 */
+function hostileCfg() {
+  const c = cfg({
+    nodes: [node('a'), node('idn', { host: '代理.example' })],
+    rules: [
+      rule({ id: 'r_rx', type: 'regex', pattern: '漫画|コミック' }),
+      rule({ id: 'r_host', type: 'host', pattern: '漫画.com' }),
+      rule({ id: 'r_wild', type: 'wildcard', pattern: 'https://*/漫画/*' }),
+      rule({ id: 'r_exact', type: 'exact', pattern: 'https://x.com/漫画.jpg' }),
+    ],
+  });
+  c.settings.bypassList = ['内网.local', '*.测试.cn'];
+  return c;
+}
+
+test('生成的 PAC 一定是纯 ASCII', () => {
+  assert.equal(isAscii(generatePac(cfg(), {})), true, '默认配置的产物必须纯 ASCII');
+  assert.equal(isAscii(generatePac(hostileCfg(), { startIndex: 0 })), true,
+    '配置里塞满中文时也必须纯 ASCII');
+  assert.equal(isAscii(generatePac(cfg({ nodes: [], rules: [] }), {})), true, '空配置同样');
+});
+
+test('PAC 里不留任何中文注释', () => {
+  // 生成器源码里的中文注释是给维护者看的，绝不能跟着产物一起下发
+  assert.doesNotMatch(generatePac(cfg(), {}), /[一-鿿]/);
+});
+
+test('转义不改变匹配语义：含中文的正则照旧命中', () => {
+  const c = cfg({ rules: [rule({ type: 'regex', pattern: '漫画' })] });
+  const pac = loadPac(generatePac(c, { startIndex: 0 }));
+  assert.match(pac.find('https://cdn.x.com/漫画/1.jpg', 'cdn.x.com'), /^PROXY /);
+  assert.equal(pac.find('https://cdn.x.com/manga/1.jpg', 'cdn.x.com'), 'DIRECT');
+});
+
+test('host 型中文域名转成 Punycode，才命中浏览器真正传进来的 host', () => {
+  // 浏览器交给 FindProxyForURL 的 host 已经是 xn-- 形式；只转义不转码的话
+  // 不再报错，但永远匹配不上 —— 那只是把崩溃换成了静默失效
+  const c = cfg({ rules: [rule({ type: 'host', pattern: '漫画.com' })] });
+  const pac = loadPac(generatePac(c, { startIndex: 0 }));
+  assert.match(pac.find('https://xn--qex62k.com/1.jpg', 'xn--qex62k.com'), /^PROXY /);
+  assert.match(pac.find('https://cdn.xn--qex62k.com/1.jpg', 'cdn.xn--qex62k.com'), /^PROXY /,
+    '子域也该命中');
+  assert.equal(pac.find('https://other.com/1.jpg', 'other.com'), 'DIRECT');
+});
+
+test('绕过列表里的中文域名转成 Punycode', () => {
+  const c = cfg({ rules: [rule({ type: 'regex', pattern: '.*' })] });
+  c.settings.bypassList = ['测试.cn'];
+  const pac = loadPac(generatePac(c, { startIndex: 0 }));
+  assert.equal(pac.find('https://xn--0zwm56d.cn/1.jpg', 'xn--0zwm56d.cn'), 'DIRECT');
+  assert.match(pac.find('https://elsewhere.cn/1.jpg', 'elsewhere.cn'), /^PROXY /);
+});
+
+test('节点主机是中文域名时，PAC token 用 Punycode', () => {
+  const c = cfg({ nodes: [node('idn', { host: '代理.example' })] });
+  const src = generatePac(c, { startIndex: 0 });
+  assert.equal(isAscii(src), true);
+  const got = loadPac(src).find(...MANGA);
+  assert.match(got, /^PROXY xn--mnq481g\.example:8080/, '实际：' + got);
+});
+
+test('对抗配置下脚本仍可执行且行为正常', () => {
+  const pac = loadPac(generatePac(hostileCfg(), { startIndex: 0 }));
+  assert.equal(typeof pac.find('https://x.com/', 'x.com'), 'string');
+  assert.equal(pac.find('https://xn--v6q792i.local/a.jpg', 'xn--v6q792i.local'), 'DIRECT',
+    '绕过列表里的中文域名转码后应生效');
 });

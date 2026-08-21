@@ -6,7 +6,9 @@
  */
 
 import { generatePac, pacSummary } from '../lib/pac-generator.js';
+import { isAscii } from '../lib/ascii.js';
 import { getConfig, getRuntime, getLogger, saveRuntime } from './state.js';
+import { noteApplyMetric } from './metrics-store.js';
 
 /** 读取当前代理设置的控制权 */
 export async function readControl() {
@@ -67,6 +69,25 @@ export async function applyProxy() {
 
   const pac = generatePac(config, { startIndex });
 
+  // 最后一道闸：chrome.proxy 只接受纯 ASCII 的 pacScript.data，含一个非 ASCII 字节就
+  // **整体**注入失败。生成器已经全程转义（见 lib/ascii.js），所以走到这里就是生成器出了
+  // bug —— 与其把 Chrome 那句英文原文甩给用户，不如自己说清楚状况。
+  if (!isAscii(pac)) {
+    const detail = 'PAC 脚本含非 ASCII 字符';
+    log.add({
+      level: 'error',
+      kind: 'proxy',
+      message: '内部错误：生成的分流脚本含非 ASCII 字符，浏览器会拒绝它。'
+        + '已保持当前代理设置不变。请在设置页的「诊断」里导出配置并反馈此问题。',
+    });
+    const control = await readControl();
+    runtime.control = control;
+    runtime.lastApplyError = detail;
+    await noteApplyMetric({ ok: false, error: detail, at: Date.now() });
+    await saveRuntime();
+    return { applied: false, summary, control };
+  }
+
   try {
     await chrome.proxy.settings.set({
       value: {
@@ -77,15 +98,21 @@ export async function applyProxy() {
       scope: 'regular',
     });
   } catch (e) {
-    log.add({ level: 'error', kind: 'proxy', message: `注入代理设置失败：${e?.message || e}` });
+    const detail = String(e?.message || e);
+    log.add({ level: 'error', kind: 'proxy', message: `注入代理设置失败：${detail}` });
     const control = await readControl();
     runtime.control = control;
+    runtime.lastApplyError = detail;
+    await noteApplyMetric({ ok: false, error: detail, at: Date.now() });
+    await saveRuntime();
     return { applied: false, summary, control };
   }
 
   const control = await readControl();
   runtime.control = control;
   runtime.lastApplyAt = Date.now();
+  runtime.lastApplyError = null;
+  await noteApplyMetric({ ok: true, at: runtime.lastApplyAt });
 
   const skippedNote = summary.skipped.nodes.length || summary.skipped.rules.length
     ? `，已跳过 ${summary.skipped.nodes.length} 个节点 / ${summary.skipped.rules.length} 条规则`

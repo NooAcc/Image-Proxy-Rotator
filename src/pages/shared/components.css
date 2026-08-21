@@ -466,6 +466,142 @@ tr.is-off > td {
   flex-wrap: wrap;
 }
 
+/* ---------------------------------------------------------------- 指标卡与占比条 */
+
+/*
+ * .kpis / .kv 都是 <dl>：一个数字和它的说明是「名称-取值」关系，用 dt/dd 表达出来，
+ * 读屏会念成「成功率：98.4%」而不是孤零零一个「98.4」。浏览器默认给 dd 加了缩进，
+ * 这里统一清掉。
+ */
+.kpis,
+.kv {
+  margin: 0;
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--gap);
+}
+
+.kpi {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+  padding: var(--gap);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.kpi__label {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.kpi__value {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+  margin: 0;
+}
+
+.kpi__num {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.kpi__unit {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.kpi__hint {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+/* 键值清单：标签定宽在左，取值在右 */
+.kv {
+  display: grid;
+  gap: 6px;
+}
+
+.kv__row {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  gap: var(--gap);
+  align-items: center;
+  min-height: 24px;
+}
+
+.kv__key {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.kv__val {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * 占比条用原生 <progress>：填充量走 value 属性而不是内联 style，这样「一切视觉
+ * 走令牌」那条约定（tests/ui-contract.test.js 断言禁止内联样式）不用为它开例外。
+ */
+.share {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.share__bar {
+  appearance: none;
+  flex: 1;
+  min-width: 48px;
+  max-width: 120px;
+  height: 6px;
+  border: none;
+  border-radius: 3px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+/* 轨道与填充要分别写：两个引擎的伪元素名不同，缺一个就只剩空槽 */
+.share__bar::-webkit-progress-bar {
+  background: var(--surface-2);
+  border-radius: 3px;
+}
+
+.share__bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.share__bar::-moz-progress-bar {
+  background: var(--accent);
+  border-radius: 3px;
+}
+
+.share__pct {
+  flex: none;
+  min-width: 44px;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  text-align: right;
+}
+
+@media (max-width: 720px) {
+  /* 窄屏里定宽标签列挤不下，退回上下堆叠 */
+  .kv__row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+}
+
 /* ---------------------------------------------------------------- 提示条 */
 
 .banner {

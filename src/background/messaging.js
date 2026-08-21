@@ -9,17 +9,18 @@
  * 由 UI 直接用它重渲染。
  */
 
-import { getConfig, setConfig, updateConfig, getLogger, getRuntime, resetStats, saveRuntime } from './state.js';
+import { getConfig, setConfig, updateConfig, getLogger, getRuntime, saveRuntime } from './state.js';
 import { applyProxy, readControl, previewPac } from './proxy-controller.js';
+import { metricsView, resetMetrics as clearMetrics, flushMetrics } from './metrics-store.js';
 import { probeNode as runProbeNode, probeAll as runProbeAll, scheduleProbeAlarm, resetNodeState as runResetNodeState } from './health-monitor.js';
 import { decodeSubscription, parseNodeList } from '../lib/node-parser.js';
 import { createNode, dedupeNodes, nodeWarnings, unsupportedNodes, isSelectable } from '../lib/node-model.js';
-import { createRule, validateRule } from '../lib/rule-matcher.js';
+import { createRule, validateRule, ruleWarnings } from '../lib/rule-matcher.js';
 import { exportConfig as serializeConfig, importConfig as deserializeConfig } from '../lib/storage.js';
 import { pacSummary } from '../lib/pac-generator.js';
 import { UNSUPPORTED_PROTOCOL_MESSAGE } from '../lib/constants.js';
 
-/** 给 UI 用的节点统计快照 */
+/** 给 UI 用的节点盘点快照。注意这里只回答「有多少节点、什么状态」，不含流量统计 */
 function buildStats(config, runtime) {
   const total = config.nodes.length;
   const unsupported = unsupportedNodes(config.nodes).length;
@@ -31,6 +32,9 @@ function buildStats(config, runtime) {
   const avgLatency = measured.length
     ? Math.round(measured.reduce((sum, n) => sum + n.health.latencyMs, 0) / measured.length)
     : null;
+  const fastest = measured.length
+    ? measured.reduce((best, n) => (n.health.latencyMs < best.health.latencyMs ? n : best))
+    : null;
 
   return {
     total,
@@ -39,9 +43,10 @@ function buildStats(config, runtime) {
     manualDisabled,
     autoDisabled,
     avgLatency,
+    fastest: fastest ? { id: fastest.id, name: fastest.name, latencyMs: fastest.health.latencyMs } : null,
     probing: runtime.probing,
     lastApplyAt: runtime.lastApplyAt,
-    perNode: runtime.stats,
+    lastApplyError: runtime.lastApplyError,
   };
 }
 
@@ -57,7 +62,9 @@ async function stateSnapshot() {
     control,
     summary: pacSummary(config),
     stats: buildStats(config, runtime),
+    metrics: await metricsView(),
     warnings: Object.fromEntries(config.nodes.map((n) => [n.id, nodeWarnings(n)])),
+    ruleWarnings: Object.fromEntries(config.rules.map((r) => [r.id, ruleWarnings(r)])),
     unsupportedIds: unsupported.map((n) => n.id),
     logs: log.list({ limit: 100 }),
   };
@@ -266,16 +273,26 @@ const handlers = {
       ok: true,
       logs: log.list({ kind: kind || undefined, level: level || undefined, limit }),
       stats: buildStats(config, runtime),
+      metrics: await metricsView(),
       control: runtime.control,
     };
   },
 
+  /** 只清日志。统计是另一件事，由 resetMetrics 负责 —— 混在一起会让人不敢点 */
   async clearLogs() {
     const log = await getLogger();
     log.clear();
-    resetStats();
     await saveRuntime();
     return { ok: true };
+  },
+
+  /** 清零全部统计计数器 */
+  async resetMetrics() {
+    await clearMetrics();
+    const log = await getLogger();
+    log.add({ level: 'info', kind: 'config', message: '统计数据已清零' });
+    await saveRuntime();
+    return { ok: true, metrics: await metricsView() };
   },
 
   async exportConfig() {
@@ -287,6 +304,9 @@ const handlers = {
     await setConfig(next);
     await applyProxy();
     await scheduleProbeAlarm();
+    // 覆盖导入会整批换掉节点/规则 id，立刻落盘一次把旧 id 的计数并进 retired，
+    // 别让它们在存储里挂到下一个节流窗口
+    await flushMetrics();
     const log = await getLogger();
     log.add({
       level: 'info',

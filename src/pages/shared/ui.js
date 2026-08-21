@@ -149,3 +149,59 @@ export function announce(node, message) {
   if (!node || node.textContent === message) return;
   node.textContent = message;
 }
+
+/**
+ * 指标卡：一个大数字 + 一行说明。
+ *
+ * 数字单独存在没有意义，所以 label 是必填的，且用 `<dt>/<dd>` 的语义关系
+ * 把两者绑在一起 —— 读屏会念成「请求总数：128」而不是孤零零一个「128」。
+ *
+ * @param {object} options
+ * @param {string} options.label 说明文字
+ * @param {string|number|null} options.value 数值；null/undefined 显示为「—」
+ * @param {string} [options.unit] 单位，小字跟在数字后
+ * @param {'ok'|'warn'|'err'|''} [options.tone] 色调，只作为第三重线索
+ * @param {string} [options.hint] 补充说明
+ */
+export function kpi({ label, value, unit = '', tone = '', hint = '' }) {
+  const shown = value === null || value === undefined || value === '' ? '—' : String(value);
+  return el('div', { class: 'kpi' },
+    el('dt', { class: 'kpi__label', text: label }),
+    el('dd', { class: 'kpi__value' },
+      el('span', { class: `num kpi__num ${tone ? `status--${tone}` : ''}`, text: shown }),
+      unit && shown !== '—' ? el('span', { class: 'kpi__unit', text: unit }) : null,
+    ),
+    hint ? el('p', { class: 'kpi__hint', text: hint }) : null,
+  );
+}
+
+/**
+ * 占比条。
+ *
+ * 用原生 `<progress>` 而不是「div + 动态 width」：后者必须写内联样式，而本项目的
+ * 约定是一切视觉走令牌（由 tests/ui-contract.test.js 断言）。`<progress>` 的填充量
+ * 是属性而不是样式，正好绕开这个矛盾，还自带语义。
+ *
+ * 条本身标 aria-hidden：紧随其后的百分比文字已经把信息说清了，读屏不必念两遍。
+ *
+ * @param {number} percent 0–100
+ */
+export function shareBar(percent) {
+  const value = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : 0;
+  return el('div', { class: 'share' },
+    el('progress', { class: 'share__bar', max: 100, value, 'aria-hidden': 'true' }),
+    el('span', { class: 'share__pct num', text: `${value}%` }),
+  );
+}
+
+/**
+ * 名称-取值行的容器项，用于「运行状态」这类键值清单。
+ * @param {string} label
+ * @param {...(Node|string|null)} value
+ */
+export function kvRow(label, ...value) {
+  return el('div', { class: 'kv__row' },
+    el('dt', { class: 'kv__key', text: label }),
+    el('dd', { class: 'kv__val' }, ...value),
+  );
+}

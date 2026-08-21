@@ -24,7 +24,9 @@ const { probeNode, probeAll, scheduleProbeAlarm, onAlarm } = await import('../sr
 const { handleMessage } = await import('../src/background/messaging.js');
 const { installRequestLogger } = await import('../src/background/request-logger.js');
 const { installAuthProvider } = await import('../src/background/auth-provider.js');
+const { resetMetrics, flushMetrics, getMetrics } = await import('../src/background/metrics-store.js');
 const { normalizeConfig } = await import('../src/lib/schema.js');
+const { METRICS_KEY } = await import('../src/lib/metrics.js');
 const { UNSUPPORTED_PROTOCOL_MESSAGE, PROBE_PARAM, ALARM_PROBE } = await import('../src/lib/constants.js');
 
 assert.equal(installRequestLogger(), true, 'webRequest 监听器应注册成功');
@@ -35,13 +37,16 @@ assert.equal(installAuthProvider(), true, 'onAuthRequired 监听器应注册成�
 const IMG = ['https://cdn.manga.com/ch1/001.jpg', 'cdn.manga.com'];
 const RULE = { id: 'r_aaaaaaa1', name: '图片', type: 'regex', pattern: '\\.jpg$', enabled: true, nodeIds: [] };
 
-/** 重置存储、运行时态与日志，并写入一份新配置 */
+/** 重置存储、运行时态、统计与日志，并写入一份新配置 */
 async function seed(partial = {}) {
   stub.reset();
   Object.assign(getRuntime(), {
-    stats: {}, startIndex: 0, control: null, summary: null, lastApplyAt: null, probing: false,
+    startIndex: 0, control: null, summary: null, lastApplyAt: null, lastApplyError: null, probing: false,
   });
   await setConfig(normalizeConfig({ enabled: true, rules: [RULE], ...partial }));
+  // 统计缓存活在模块作用域里，stub.reset() 清不掉它 —— 必须显式清零，
+  // 否则上一个用例的计数会漏到下一个用例
+  await resetMetrics();
   (await getLogger()).clear();
   return getConfig();
 }
@@ -461,3 +466,198 @@ test('不命中规则的请求不记日志；测速请求只补出口 IP', async
   assert.equal((await logsOf({ kind: 'request' })).length, 0, '测速日志由 health-monitor 记，这里不重复');
   assert.equal((await getConfig()).nodes[0].health.egressIp, '198.51.100.9');
 });
+
+// ---------------------------------------------------------------- 统计计数器
+
+test('走了代理的请求进入统计：总量、成功率、耗时、按规则命中', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await applyProxy();
+
+  await stub.emit('onBeforeRequest', { requestId: 'm-1', url: IMG[0] });
+  await stub.emit('onCompleted', { requestId: 'm-1', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onBeforeRequest', { requestId: 'm-2', url: IMG[0] });
+  await stub.emit('onCompleted', { requestId: 'm-2', url: IMG[0], statusCode: 503, ip: '203.0.113.7' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 2);
+  assert.equal(metrics.requests.ok, 1);
+  assert.equal(metrics.requests.fail, 1);
+  assert.equal(metrics.requests.successRate, 50);
+  assert.equal(metrics.rules.rows.find((r) => r.id === RULE.id).hits, 2);
+  assert.ok(Number.isFinite(metrics.requests.avgLatencyMs), '应当算出平均耗时');
+});
+
+test('不命中规则的请求不进统计', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', {
+    requestId: 'm-3', url: 'https://cdn.manga.com/app.js', statusCode: 200, ip: '1.1.1.1',
+  });
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 0, '直连的请求不属于「分流统计」');
+});
+
+test('连接层失败也计入总量，成功率不虚高', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onErrorOccurred', { requestId: 'm-4', url: IMG[0], error: 'net::ERR_FAILED' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 1);
+  assert.equal(metrics.requests.fail, 1);
+  assert.equal(metrics.requests.successRate, 0);
+});
+
+test('归因不到节点的请求单独计数，不硬塞给某个节点', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  // 出口 IP 不属于任何已知节点：代理没转发、或出口地址还没测出来
+  await stub.emit('onCompleted', { requestId: 'm-5', url: IMG[0], statusCode: 200, ip: '198.51.100.200' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 1);
+  assert.equal(metrics.requests.unattributed, 1);
+  assert.equal(metrics.nodes.rows.find((r) => r.id === 'n_aaaaaaa1').used, 0);
+});
+
+test('出口 IP 已知时归因到具体节点', async () => {
+  await seed({
+    nodes: [nodeFixture('n_aaaaaaa1', {
+      health: {
+        status: 'ok', latencyMs: 20, lastCheckedAt: 1,
+        consecutiveFailures: 0, lastError: null, egressIp: '203.0.113.7',
+      },
+    })],
+  });
+  await stub.emit('onCompleted', { requestId: 'm-6', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  const row = metrics.nodes.rows.find((r) => r.id === 'n_aaaaaaa1');
+  assert.equal(row.used, 1);
+  assert.equal(row.share, 100);
+  assert.equal(metrics.requests.unattributed, 0);
+});
+
+test('测速与 PAC 注入的成败都计入统计', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await applyProxy();
+  await probeNode('n_aaaaaaa1');
+  stub.setFetch(async () => { throw new Error('Failed to fetch'); });
+  await probeNode('n_aaaaaaa1');
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.probe.ok, 1);
+  assert.equal(metrics.probe.fail, 1);
+  assert.equal(metrics.probe.successRate, 50);
+  assert.ok(metrics.apply.ok > 0, '注入成功也要计数');
+});
+
+test('注入失败时记下失败次数与原因', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  stub.setSettingsError('被企业策略禁止');
+  await applyProxy();
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.apply.fail, 1);
+  assert.match(metrics.apply.lastError, /被企业策略禁止/);
+});
+
+test('注入成功后清掉上一次的失败原因，界面不挂过期错误', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  stub.setSettingsError('临时故障');
+  await applyProxy();
+  stub.setSettingsError(null);
+  await applyProxy();
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.apply.lastError, null);
+});
+
+test('统计落盘到 storage.local，跨浏览器重启保留', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', { requestId: 'm-7', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await flushMetrics();
+
+  const stored = stub.local._dump()[METRICS_KEY];
+  assert.ok(stored, '统计必须写进 storage.local —— session 区一关浏览器就没了');
+  assert.equal(stored.requests.total, 1);
+});
+
+test('统计体积不随时间增长：删掉的节点并入 retired 而不是留下孤儿键', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1'), nodeFixture('n_aaaaaaa2')] });
+  await stub.emit('onCompleted', { requestId: 'm-8', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await handleMessage({ type: 'deleteNode', id: 'n_aaaaaaa1' });
+  await handleMessage({ type: 'deleteNode', id: 'n_aaaaaaa2' });
+  await flushMetrics();
+
+  const stored = stub.local._dump()[METRICS_KEY];
+  assert.deepEqual(Object.keys(stored.perNode), [], '配置里没有的节点不许在统计里留键');
+  assert.equal(stored.requests.total, 1, '总量不受剪枝影响');
+});
+
+test('清空日志不动统计，清零统计不动日志 —— 两件事各自独立', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', { requestId: 'm-9', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  assert.equal((await logsOf({ kind: 'request' })).length, 1);
+
+  await handleMessage({ type: 'clearLogs' });
+  assert.equal((await logsOf()).length, 0);
+  assert.equal((await handleMessage({ type: 'getState' })).metrics.requests.total, 1,
+    '清日志不该顺手抹掉统计');
+
+  const reset = await handleMessage({ type: 'resetMetrics' });
+  assert.equal(reset.metrics.requests.total, 0);
+  assert.equal((await getMetrics()).since, null);
+  assert.ok((await logsOf()).length > 0, '清零统计会留下一条说明日志');
+});
+
+test('getLogs 的轻量轮询也带上统计，弹窗不用再发第二条消息', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', { requestId: 'm-11', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+
+  const result = await handleMessage({ type: 'getLogs', limit: 10 });
+  assert.equal(result.metrics.requests.total, 1);
+  assert.ok(result.stats, '节点盘点也要一起带回来');
+});
+
+test('getState 带出最快节点与平均延迟，供统计面板直接展示', async () => {
+  const health = (latencyMs) => ({
+    status: 'ok', latencyMs, lastCheckedAt: 1, consecutiveFailures: 0, lastError: null, egressIp: null,
+  });
+  await seed({
+    nodes: [
+      nodeFixture('n_aaaaaaa1', { health: health(300) }),
+      nodeFixture('n_aaaaaaa2', { health: health(40) }),
+    ],
+  });
+  const { stats } = await handleMessage({ type: 'getState' });
+  assert.equal(stats.fastest.id, 'n_aaaaaaa2');
+  assert.equal(stats.avgLatency, 170);
+});
+
+test('注入的 PAC 一定是纯 ASCII，即便配置里全是中文', async () => {
+  // 这是 #2 那个 bug 的回归测试：非 ASCII 会让 chrome.proxy 整体拒绝注入，
+  // 而失败后浏览器照旧直连 —— 表现成「扩展安静地什么都没做」
+  await seed({
+    nodes: [nodeFixture('n_aaaaaaa1', { host: '代理.example' })],
+    rules: [
+      { id: 'r_ccccccc1', name: '中文域名', type: 'host', pattern: '漫画.com', enabled: true, nodeIds: [] },
+      { id: 'r_ccccccc2', name: '中文正则', type: 'regex', pattern: '漫画|コミック', enabled: true, nodeIds: [] },
+    ],
+  });
+  const result = await applyProxy();
+
+  assert.equal(result.applied, true, '不该再因为非 ASCII 而注入失败');
+  const pac = stub.lastPac();
+  assert.ok(pac, '必须真的注入了脚本');
+  // eslint-disable-next-line no-control-regex
+  assert.doesNotMatch(pac, /[^\x00-\x7F]/, '注入的 PAC 含非 ASCII 字符，浏览器会整体拒绝');
+  assert.match(textOf(await logsOf({ kind: 'proxy' })), /已生效/);
+});
+
+test('规则的非 ASCII 提示随 getState 一起下发', async () => {
+  await seed({
+    nodes: [nodeFixture('n_aaaaaaa1')],
+    rules: [{ id: 'r_bbbbbbb1', name: '中文正则', type: 'regex', pattern: '漫画', enabled: true, nodeIds: [] }],
+  });
+  const result = await handleMessage({ type: 'getState' });
+  assert.match(result.ruleWarnings.r_bbbbbbb1[0], /Punycode/);
+});
+

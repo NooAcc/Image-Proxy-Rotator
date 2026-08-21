@@ -11,10 +11,10 @@
  */
 
 import {
-  send, el, clear, debounce, fmtLatency, fmtAgo,
+  send, el, clear, debounce, fmtLatency, fmtAgo, fmtTime,
   downloadText, copyText, fileStamp,
 } from '../shared/api.js';
-import { btn, badge, statusChip, statusLabel, setBanner, announce } from '../shared/ui.js';
+import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar, kvRow } from '../shared/ui.js';
 import { matchUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { selectablePool } from '../../lib/scheduler.js';
@@ -33,6 +33,7 @@ const $ = (id) => document.getElementById(id);
  * 顺序即侧栏顺序；第一个是默认分区。
  */
 const PANELS = [
+  { hash: 'stats', panel: 'panelStats' },
   { hash: 'nodes', panel: 'panelNodes' },
   { hash: 'rules', panel: 'panelRules' },
   { hash: 'routing', panel: 'panelRouting' },
@@ -42,7 +43,10 @@ const PANELS = [
 /** 当前配置（只作为渲染快照，写操作一律走后台） */
 let config = null;
 let warnings = {};
+let ruleNotes = {};
 let stats = {};
+let metrics = null;
+let control = null;
 /** 正在编辑的规则 id；null 表示新建 */
 let editingRuleId = null;
 
@@ -55,6 +59,8 @@ function activatePanel(wanted) {
     if (link.getAttribute('href') === `#${target.hash}`) link.setAttribute('aria-current', 'page');
     else link.removeAttribute('aria-current');
   }
+  // 统计是唯一需要持续刷新的一屏，切走就停 —— 每次轮询都会唤醒 Service Worker
+  setStatsPoll(target.hash === 'stats');
   // 换了一屏就该从头看，而不是停在上一屏滚到的位置
   window.scrollTo({ top: 0 });
 }
@@ -63,10 +69,30 @@ function activatePanel(wanted) {
 
 function render() {
   renderTopbar();
+  renderStatsPanel();
   renderNodes();
   renderRules();
+  renderRuleWarnings();
   renderRuleNodeOptions();
   renderSettings();
+}
+
+/**
+ * 「为什么没生效」的唯一判定处。
+ *
+ * 顶栏摘要和统计面板都用它，避免两处各写一遍判断然后慢慢长歪。
+ * @returns {{text: string, tone: 'ok'|'warn'|'err'|'muted'}}
+ */
+function runState() {
+  const available = config.nodes.filter(isSelectable).length;
+  const activeRules = config.rules.filter((r) => r.enabled && validateRule(r).ok).length;
+  const occupied = Boolean(control) && !control.controlled && control.levelOfControl !== 'unavailable';
+
+  if (!config.enabled) return { text: '已关闭，当前全部直连', tone: 'muted' };
+  if (occupied) return { text: '代理设置被其他程序占用', tone: 'err' };
+  if (available === 0) return { text: '没有可用节点，当前全部直连', tone: 'err' };
+  if (activeRules === 0) return { text: '没有生效的规则，当前全部直连', tone: 'warn' };
+  return { text: `已生效（${available} 个节点 / ${activeRules} 条规则）`, tone: 'ok' };
 }
 
 function renderTopbar() {
@@ -85,10 +111,143 @@ function renderTopbar() {
     `${config.rules.length} 条规则（生效 ${activeRules}）`,
   ];
   // 「为什么没生效」必须直接写在最显眼处，而不是让用户翻各个分区自己拼线索
-  if (!config.enabled) parts.push('总开关关闭，当前全部直连');
-  else if (available === 0) parts.push('没有可用节点，当前全部直连');
-  else if (activeRules === 0) parts.push('没有生效的规则，当前全部直连');
+  const state = runState();
+  if (state.tone !== 'ok') parts.push(state.text);
   announce($('summaryText'), parts.join('　·　'));
+}
+
+// ---------------------------------------------------------------- 统计面板
+
+function renderStatsPanel() {
+  // 轮询可能早于首次 getState 返回就跑起来（启动时 activatePanel 先执行），
+  // 这时还没有配置可渲染
+  if (!config) return;
+  renderRunState();
+  renderRequestKpis();
+  renderNodeUsage();
+  renderRuleHits();
+}
+
+function renderRunState() {
+  const box = $('runStateList');
+  clear(box);
+  const state = runState();
+  const apply = metrics?.apply;
+  const probe = metrics?.probe;
+
+  $('metricsSince').textContent = metrics?.since
+    ? `以下数字自 ${fmtTime(metrics.since)}（${fmtAgo(metrics.since)}）起累计，跨浏览器重启保留。`
+    : '还没有任何统计数据。开启总开关并访问漫画页后，这里就会开始累计。';
+
+  box.append(
+    kvRow('当前状态', el('span', { class: `status status--${state.tone}` },
+      el('span', { class: 'status__glyph', 'aria-hidden': 'true', text: state.tone === 'ok' ? '●' : '○' }),
+      el('span', { text: state.text }))),
+    kvRow('代理设置控制权', control
+      ? el('span', {
+        class: control.controlled ? 'status status--ok' : 'status status--warn',
+        text: control.controlled ? '由本扩展掌握' : `${control.levelOfControl}（可能被占用）`,
+      })
+      : '未知'),
+    kvRow('上次注入分流脚本', stats.lastApplyAt
+      ? `${fmtTime(stats.lastApplyAt)}（${fmtAgo(stats.lastApplyAt)}）`
+      : '从未'),
+    kvRow('注入次数', apply ? `成功 ${apply.ok} 次 / 失败 ${apply.fail} 次` : '—'),
+    kvRow('测速次数', probe
+      ? `成功 ${probe.ok} 次 / 失败 ${probe.fail} 次`
+        + (probe.successRate === null ? '' : `（成功率 ${probe.successRate}%）`)
+      : '—'),
+    kvRow('可用节点平均延迟', fmtLatency(stats.avgLatency)),
+    kvRow('当前最快节点', stats.fastest
+      ? `${stats.fastest.name}（${fmtLatency(stats.fastest.latencyMs)}）`
+      : '—'),
+  );
+
+  // 上一次注入失败的原因必须留在界面上 —— 它是「配了却不生效」的头号线索。
+  // 用固定的告警条而不是往列表里 append：后者每次轮询都会重建，读屏会反复播报
+  setBanner($('applyError'), apply?.lastError ? `上次注入分流脚本失败：${apply.lastError}` : '', 'err');
+}
+
+function renderRequestKpis() {
+  const box = $('requestKpis');
+  clear(box);
+  const req = metrics?.requests;
+  if (!req) return;
+
+  box.append(
+    kpi({ label: '走代理的请求', value: req.total, unit: '次' }),
+    kpi({ label: '成功', value: req.ok, unit: '次', tone: 'ok' }),
+    kpi({ label: '失败', value: req.fail, unit: '次', tone: req.fail > 0 ? 'err' : '' }),
+    kpi({
+      label: '成功率',
+      value: req.successRate,
+      unit: '%',
+      tone: req.successRate === null ? '' : (req.successRate >= 95 ? 'ok' : 'warn'),
+      hint: 'HTTP 状态码小于 400 算成功',
+    }),
+    kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms', hint: '只统计真的测到耗时的请求' }),
+    kpi({
+      label: '无法归因',
+      value: req.unattributed,
+      unit: '次',
+      tone: req.unattributed > 0 ? 'warn' : '',
+      hint: '认不出走的是哪个节点。先测速可减少；数字很大则多半是在走直连兜底',
+    }),
+  );
+}
+
+function renderNodeUsage() {
+  const body = $('nodeUsageBody');
+  clear(body);
+  const rows = metrics?.nodes.rows ?? [];
+  const empty = rows.length === 0;
+  $('nodeUsageEmpty').hidden = !empty;
+  $('nodeUsageTable').hidden = empty;
+  if (empty) return;
+
+  for (const row of rows) {
+    body.append(el('tr', { class: row.exists ? '' : 'is-off' },
+      el('td', { class: 'truncate' }, row.name, row.exists ? null : badge('已删除', 'warn')),
+      el('td', { class: 'num', text: `${row.used}` }),
+      el('td', { class: 'num', text: `${row.ok}` }),
+      el('td', { class: 'num', text: `${row.fail}` }),
+      el('td', { class: 'num', text: row.successRate === null ? '—' : `${row.successRate}%` }),
+      el('td', {}, shareBar(row.share)),
+    ));
+  }
+
+  // 已删除节点的历史用量单独成行：不这么做，各节点占比加起来就不到 100%，
+  // 用户会以为统计算错了
+  if (metrics.nodes.retiredUsed > 0) {
+    body.append(el('tr', { class: 'is-off' },
+      el('td', { class: 'truncate', text: '已删除的节点（历史累计）' }),
+      el('td', { class: 'num', text: `${metrics.nodes.retiredUsed}` }),
+      el('td', { class: 'num', text: '—' }),
+      el('td', { class: 'num', text: '—' }),
+      el('td', { class: 'num', text: '—' }),
+      el('td', {}, shareBar(Math.round((metrics.nodes.retiredUsed / metrics.nodes.totalUsed) * 1000) / 10)),
+    ));
+  }
+}
+
+function renderRuleHits() {
+  const body = $('ruleHitBody');
+  clear(body);
+  const rows = metrics?.rules.rows ?? [];
+  const empty = rows.length === 0;
+  $('ruleHitEmpty').hidden = !empty;
+  $('ruleHitTable').hidden = empty;
+  if (empty) return;
+
+  for (const row of rows) {
+    body.append(el('tr', { class: row.exists && row.hits > 0 ? '' : 'is-off' },
+      el('td', { class: 'truncate' }, row.name, row.exists ? null : badge('已删除', 'warn')),
+      el('td', {}, row.type ? badge(RULE_TYPE_LABELS[row.type] ?? row.type) : '—'),
+      el('td', { class: 'pattern truncate', text: row.pattern || '—', title: row.pattern }),
+      el('td', { class: 'num', text: `${row.hits}` }),
+      el('td', {}, shareBar(row.share)),
+    ));
+  }
 }
 
 function renderNodes() {
@@ -101,7 +260,7 @@ function renderNodes() {
   for (const node of config.nodes) {
     const supported = isSupported(node);
     const usable = supported && node.enabled && !node.autoDisabled;
-    const stat = stats.perNode?.[node.id];
+    const used = metrics?.nodes.rows.find((r) => r.id === node.id)?.used ?? 0;
 
     body.append(el('tr', { class: usable ? '' : 'is-off' },
       el('td', {},
@@ -138,7 +297,7 @@ function renderNodes() {
           ? el('p', { class: 'hint', text: fmtAgo(node.health.lastCheckedAt) })
           : null,
       ),
-      el('td', { class: 'used', text: stat ? `${stat.used}` : '0' }),
+      el('td', { class: 'used', text: `${used}` }),
       el('td', {}, el('div', { class: 'cell-ops' },
         supported ? btn({ text: '测速', size: 'sm', onClick: () => probeOne(node.id) }) : null,
         supported && node.autoDisabled
@@ -226,6 +385,16 @@ function renderRules() {
   });
 }
 
+function renderRuleWarnings() {
+  const box = $('ruleWarnings');
+  clear(box);
+  for (const rule of config.rules) {
+    for (const message of ruleNotes[rule.id] ?? []) {
+      box.append(el('div', { class: 'banner banner--warn', text: `规则「${rule.name}」：${message}` }));
+    }
+  }
+}
+
 function renderRuleNodeOptions() {
   const select = $('ruleNodes');
   const selected = new Set([...select.selectedOptions].map((o) => o.value));
@@ -272,9 +441,46 @@ async function refresh(response) {
   const state = response ?? await send('getState');
   config = state.config;
   if (state.warnings) warnings = state.warnings;
+  if (state.ruleWarnings) ruleNotes = state.ruleWarnings;
   if (state.stats) stats = state.stats;
-  if (state.control) renderControlWarning(state.control);
+  if (state.metrics) metrics = state.metrics;
+  if (state.control) {
+    control = state.control;
+    renderControlWarning(state.control);
+  }
   render();
+}
+
+/**
+ * 统计面板的轻量轮询。
+ *
+ * 只在这一屏可见时跑 —— 每次轮询都会唤醒 Service Worker，切到别的分区还继续轮询
+ * 纯属浪费。用 getLogs 而不是 getState：前者已经带着统计与节点盘点，把 limit 压到 1
+ * 就不会顺带搬运一堆日志。
+ */
+const STATS_POLL_MS = 5000;
+let statsTimer = null;
+
+async function pollStats() {
+  try {
+    const res = await send('getLogs', { limit: 1 });
+    if (res.stats) stats = res.stats;
+    if (res.metrics) metrics = res.metrics;
+    if (res.control) control = res.control;
+    renderStatsPanel();
+  } catch {
+    // 轮询失败不值得打扰用户，下一次会再试
+  }
+}
+
+function setStatsPoll(active) {
+  if (active && !statsTimer) {
+    statsTimer = setInterval(pollStats, STATS_POLL_MS);
+    void pollStats();
+  } else if (!active && statsTimer) {
+    clearInterval(statsTimer);
+    statsTimer = null;
+  }
 }
 
 /** 统一的错误出口：任何失败都要在界面上说清楚，不允许静默 */
@@ -586,6 +792,16 @@ $('btnRefreshPac').addEventListener('click', async () => {
     const res = await send('getPacPreview');
     $('pacPreview').textContent = res.pac;
   }, 'ioError');
+});
+
+$('btnResetMetrics').addEventListener('click', async () => {
+  if (!confirm('确定把所有统计计数清零？\n\n只影响统计数字，节点、规则与设置都不会变。')) return;
+  await guard(async () => {
+    const res = await send('resetMetrics');
+    metrics = res.metrics;
+    renderStatsPanel();
+    setBanner($('globalError'), '统计数据已清零。', 'ok');
+  });
 });
 
 // ---------------------------------------------------------------- 启动

@@ -7,10 +7,15 @@
  *
  * `details.ip` 是这次连接的对端 IP —— 走代理时它就是代理的出口地址。
  * 这是「分流真的生效了」最硬的证据，所以一定要记进日志给用户看。
+ *
+ * 归因说明：按出口 IP 反查节点**会漏**（代理没转发、IP 未知、多个节点共用出口）。
+ * 漏掉的请求记进 metrics 的 unattributed，而不是丢弃、也不硬塞给某个节点 ——
+ * 「有 12 次没归因上」是有用的信息，一个凑整的假数字不是。
  */
 
 import { matchUrl } from '../lib/rule-matcher.js';
-import { getConfig, getLogger, bumpNodeStat, saveRuntime, updateConfig } from './state.js';
+import { getConfig, getLogger, queueRuntimeSave, updateConfig } from './state.js';
+import { noteRequestMetric } from './metrics-store.js';
 import { PROBE_PARAM } from '../lib/constants.js';
 
 /** requestId -> {url, startedAt}，用于算耗时 */
@@ -62,7 +67,15 @@ export function installRequestLogger() {
       const log = await getLogger();
       const ok = details.statusCode < 400;
       const attributed = details.ip ? findNodeByIp(config.nodes, details.ip) : null;
-      if (attributed) bumpNodeStat(attributed.id, ok);
+      const latencyMs = record ? Date.now() - record.startedAt : null;
+
+      await noteRequestMetric({
+        ok,
+        latencyMs,
+        nodeId: attributed?.id ?? null,
+        ruleId: rule.id,
+        at: Date.now(),
+      });
 
       log.add({
         level: ok ? 'info' : 'warn',
@@ -70,11 +83,12 @@ export function installRequestLogger() {
         ok,
         url: details.url,
         nodeId: attributed?.id ?? null,
-        latencyMs: record ? Date.now() - record.startedAt : null,
+        latencyMs,
         message: `${details.statusCode} ${shorten(details.url)}`
           + (details.ip ? `（出口 ${details.ip}${attributed ? ` → ${attributed.name}` : ''}）` : ''),
       });
-      await saveRuntime();
+      // 热路径：一个漫画页能打出几百个请求，落盘必须走节流
+      queueRuntimeSave();
     } catch {
       // 日志本身不能把请求流程搞崩
     }
@@ -86,7 +100,12 @@ export function installRequestLogger() {
       const config = await getConfig();
       if (!config.enabled) return;
       if (probeNodeId(details.url)) return; // 探测失败由 health-monitor 记
-      if (!matchUrl(details.url, config.rules)) return;
+      const rule = matchUrl(details.url, config.rules);
+      if (!rule) return;
+
+      // 连接层面就失败了，没有出口 IP 可归因，但它确实是一次「本该走代理」的请求，
+      // 不计入总量会让成功率虚高
+      await noteRequestMetric({ ok: false, nodeId: null, ruleId: rule.id, at: Date.now() });
 
       const log = await getLogger();
       log.add({
@@ -96,7 +115,7 @@ export function installRequestLogger() {
         url: details.url,
         message: `请求失败：${details.error} ${shorten(details.url)}`,
       });
-      await saveRuntime();
+      queueRuntimeSave();
     } catch {
       // 同上
     }

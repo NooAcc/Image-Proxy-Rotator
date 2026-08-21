@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createRule, validateRule, compileRule, matchUrl, wildcardToRegexSource, makeRuleId } from '../src/lib/rule-matcher.js';
+import { createRule, validateRule, compileRule, matchUrl, wildcardToRegexSource, makeRuleId, ruleWarnings } from '../src/lib/rule-matcher.js';
 
 const R = (o) => createRule({ type: 'exact', pattern: '', enabled: true, ...o });
 
@@ -98,4 +98,49 @@ test('createRule 填充默认值', () => {
 test('规则可绑定节点子集', () => {
   const c = compileRule(R({ type: 'host', pattern: 'a.com', nodeIds: ['n_1', 'n_2'] }));
   assert.deepEqual(c.nodeIds, ['n_1', 'n_2']);
+});
+
+// ---------------------------------------------------------------- 中文域名
+
+test('host 型规则的中文域名被转成 Punycode 后匹配', () => {
+  // 浏览器给出的 hostname 已是 xn-- 形式，不转码这条规则就永远命中不了
+  const c = compileRule(R({ type: 'host', pattern: '漫画.com' }));
+  assert.equal(c.test('https://xn--qex62k.com/1.jpg', 'xn--qex62k.com'), true);
+  assert.equal(c.test('https://cdn.xn--qex62k.com/1.jpg', 'cdn.xn--qex62k.com'), true, '子域应命中');
+  assert.equal(c.test('https://other.com/1.jpg', 'other.com'), false);
+});
+
+test('host 型规则不传 host 时也能从 URL 推出 Punycode 主机名', () => {
+  const c = compileRule(R({ type: 'host', pattern: '漫画.com' }));
+  assert.equal(c.test('https://漫画.com/1.jpg'), true, 'hostOf 会把中文域名解析成 xn-- 形式');
+});
+
+test('matchUrl 对中文域名与 PAC 给出一致结论', () => {
+  const rules = [R({ type: 'host', pattern: '漫画.com', name: 'IDN' })];
+  assert.equal(matchUrl('https://xn--qex62k.com/1.jpg', rules)?.name, 'IDN');
+  assert.equal(matchUrl('https://漫画.com/1.jpg', rules)?.name, 'IDN');
+});
+
+test('ruleWarnings 对 URL 形态里的非 ASCII 给出提示', () => {
+  // 这类规则合法、也进得了 PAC，但域名段已被浏览器转码，多半永远不命中 ——
+  // 静默失效比报错更难排查，所以必须显式提示
+  for (const type of ['exact', 'prefix', 'wildcard', 'regex']) {
+    const warnings = ruleWarnings(R({ type, pattern: 'https://漫画.com/a.jpg' }));
+    assert.equal(warnings.length, 1, `${type} 应给出一条提示`);
+    assert.match(warnings[0], /Punycode/);
+  }
+});
+
+test('ruleWarnings 对 host 型的中文域名不提示（我们已自动转码）', () => {
+  assert.deepEqual(ruleWarnings(R({ type: 'host', pattern: '漫画.com' })), []);
+});
+
+test('ruleWarnings 对纯 ASCII 规则不提示', () => {
+  assert.deepEqual(ruleWarnings(R({ type: 'regex', pattern: '\.(jpe?g|png)$' })), []);
+  assert.deepEqual(ruleWarnings(R({ type: 'host', pattern: 'manga.com' })), []);
+});
+
+test('ruleWarnings 对非法规则不提示（合法性由 validateRule 负责）', () => {
+  assert.deepEqual(ruleWarnings({ type: 'regex', pattern: '([漫画' }), []);
+  assert.deepEqual(ruleWarnings(null), []);
 });

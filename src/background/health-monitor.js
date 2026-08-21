@@ -13,6 +13,7 @@
 import { PROBE_PARAM, ALARM_PROBE, SLOW_LATENCY_MS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../lib/constants.js';
 import { isSupported, protocolLabel } from '../lib/node-model.js';
 import { getConfig, updateConfig, getLogger, getRuntime, saveRuntime } from './state.js';
+import { noteProbeMetric } from './metrics-store.js';
 import { applyProxy } from './proxy-controller.js';
 
 /** 一次全量探测的并发上限，避免瞬间打出几十个请求 */
@@ -89,6 +90,8 @@ export async function recordProbeResult(nodeId, result) {
   const log = await getLogger();
   let autoDisabledNow = false;
   let recoveredNow = false;
+
+  await noteProbeMetric({ ok: result.ok === true, at: Date.now() });
 
   await updateConfig((config) => {
     const node = config.nodes.find((n) => n.id === nodeId);

@@ -7,6 +7,7 @@
  */
 
 import { RULE_TYPES } from './constants.js';
+import { isAscii, toAsciiHost } from './ascii.js';
 import { stableId, isValidId } from './hash.js';
 
 /** 生成稳定的规则 id */
@@ -80,6 +81,33 @@ export function hostOf(url) {
 }
 
 /**
+ * 规则的「能存但多半不会如你所愿」提示。
+ *
+ * 与 validateRule 的分工：validateRule 判**合法性**（非法规则根本不进 PAC），
+ * 这里判**有效性** —— 规则完全合法、也进了 PAC，但很可能永远命中不了。
+ *
+ * 目前只有一种：非 ASCII 的 URL 形态规则。浏览器交给 FindProxyForURL 的 URL 里，
+ * 域名部分已经是 Punycode 形式；host 型规则我们能安全转码（compileRule 与 PAC 都做了），
+ * 但 exact/prefix/wildcard/regex 是整条 URL 的模式，无法判断哪一段是域名，改写会出错。
+ * 所以这类规则原样保留，并明确告诉用户它可能不生效 —— 静默失效比报错更难排查。
+ *
+ * @param {object} rule
+ * @returns {string[]} 可直接展示的中文提示
+ */
+export function ruleWarnings(rule) {
+  const warnings = [];
+  if (!rule || !validateRule(rule).ok) return warnings;
+
+  const type = String(rule.type).toLowerCase().trim();
+  if (type !== 'host' && !isAscii(rule.pattern)) {
+    warnings.push('规则内容含非 ASCII 字符。浏览器传给分流脚本的网址里，中文域名已被转换成 '
+      + 'Punycode（形如 xn--qex62k.com），因此这条规则可能永远命中不了。'
+      + '若你想匹配的是域名，请改用「域名」类型 —— 那种类型会自动转换。');
+  }
+  return warnings;
+}
+
+/**
  * 编译规则为可反复调用的匹配器。
  * 非法规则会得到一个「永不命中」的匹配器 —— 绝不抛异常，
  * 否则一条手误的正则就能让整个匹配流程崩掉。
@@ -103,14 +131,18 @@ export function compileRule(rule) {
     case 'prefix':
       return { ...base, test: (url) => String(url).startsWith(pattern) };
 
-    case 'host':
+    case 'host': {
+      // 与 PAC 保持一致：浏览器给出的 hostname 已是 Punycode 形式，
+      // 所以中文域名规则必须先转码，否则这里和 PAC 会给出两种答案
+      const target = toAsciiHost(pattern);
       return {
         ...base,
         test: (url, host) => {
           const h = host ?? hostOf(url);
-          return h === pattern || h.endsWith(`.${pattern}`);
+          return h === target || h.endsWith(`.${target}`);
         },
       };
+    }
 
     case 'wildcard': {
       const re = new RegExp(wildcardToRegexSource(pattern));

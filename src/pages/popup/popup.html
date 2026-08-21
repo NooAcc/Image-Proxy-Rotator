@@ -60,12 +60,13 @@
 
   <!--
     这里刻意**不用** role="tablist"/"tab"：那套模式要求方向键漫游 + roving tabindex，
-    只做一半比不做更糟。三个普通按钮配 aria-pressed，语义准确且 Tab 键天然可达。
+    只做一半比不做更糟。四个普通按钮配 aria-pressed，语义准确且 Tab 键天然可达。
   -->
   <div class="segmented" role="group" aria-label="切换视图">
     <button type="button" class="seg" id="tabNodes">节点</button>
     <button type="button" class="seg" id="tabRules">规则</button>
     <button type="button" class="seg" id="tabLogs">活动</button>
+    <button type="button" class="seg" id="tabStats">统计</button>
   </div>
 
   <div class="head__filter" id="logFilterRow" hidden>
@@ -80,7 +81,7 @@
   </div>
 </header>
 
-<!-- 唯一的滚动区。三个视图共用它，所以弹窗总高恒定。
+<!-- 唯一的滚动区。四个视图共用它，所以弹窗总高恒定。
      tabindex 是必要的：键盘用户需要能聚焦这块才能用方向键滚动。 -->
 <div class="body" id="paneBody" role="region" tabindex="0"></div>
 

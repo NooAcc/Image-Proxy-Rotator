@@ -94,7 +94,7 @@ body {
 
 .segmented {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 2px;
   padding: 2px;
   background: var(--bg);
@@ -234,3 +234,80 @@ body {
 
 .log-row.is-warn .log-row__msg { color: var(--warn); }
 .log-row.is-error .log-row__msg { color: var(--err); }
+
+/* ---------------------------------------------------------------- 统计视图 */
+
+.sect {
+  display: grid;
+  gap: 6px;
+  margin-block-end: var(--gap-lg);
+}
+
+.sect:last-child {
+  margin-block-end: 0;
+}
+
+.sect__title {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* 380px 宽的弹窗里，指标卡两列刚好；组件层的 auto-fit 会自己收到两列，
+   这里只把内边距和字号压小一档，免得四张卡把首屏吃光 */
+.sect .kpis {
+  gap: 6px;
+}
+
+.sect .kpi {
+  padding: 6px 7px;
+}
+
+.sect .kpi__num {
+  font-size: 17px;
+}
+
+.ranks {
+  display: grid;
+  gap: 5px;
+}
+
+.rank {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+}
+
+.rank.is-off .rank__name {
+  color: var(--fg-muted);
+}
+
+.rank__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rank__num {
+  flex: none;
+  min-width: 28px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* 弹窗窄，占比条让给名字，只留够看出长短的宽度 */
+.rank .share__bar {
+  max-width: 64px;
+  min-width: 32px;
+}
+
+.rank .share__pct {
+  min-width: 40px;
+  font-size: var(--text-xs);
+}

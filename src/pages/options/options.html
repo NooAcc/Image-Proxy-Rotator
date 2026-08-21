@@ -27,6 +27,7 @@
 
 <div class="shell">
   <nav class="sidenav" aria-label="设置分区">
+    <a class="navitem" href="#stats">统计</a>
     <a class="navitem" href="#nodes">节点<span class="navitem__count num" id="navCountNodes"></span></a>
     <a class="navitem" href="#rules">规则<span class="navitem__count num" id="navCountRules"></span></a>
     <a class="navitem" href="#routing">分流</a>
@@ -34,6 +35,86 @@
   </nav>
 
   <main class="content">
+
+    <!-- ==================== 统计 ====================
+      放在侧栏第一项并作为默认分区：本页的顶栏摘要只回答「配了多少、有没有生效」，
+      回答不了「到底分流出去多少请求、哪个节点在干活、哪条规则从没命中」。
+      那些问题才是用户打开这个扩展最想知道的，不该藏在导航后面。
+    -->
+    <section class="panel" id="panelStats" aria-labelledby="statsTitle">
+      <h1 id="statsTitle" class="panel__title">统计</h1>
+
+      <section class="card">
+        <div class="card__head">
+          <h2>运行状态</h2>
+          <div class="btn-row">
+            <button type="button" class="btn btn--danger" id="btnResetMetrics">清零统计</button>
+          </div>
+        </div>
+        <p class="hint" id="metricsSince">正在加载…</p>
+        <dl class="kv" id="runStateList"></dl>
+        <div class="banner banner--err" id="applyError" hidden></div>
+      </section>
+
+      <section class="card">
+        <div class="card__head"><h2>请求统计</h2></div>
+        <p class="hint">
+          只统计<strong>命中规则、本该走代理</strong>的请求；直连的请求不计入。
+          成功的判定是 HTTP 状态码小于 400。
+        </p>
+        <dl class="kpis" id="requestKpis"></dl>
+      </section>
+
+      <section class="card">
+        <div class="card__head"><h2>节点使用分布</h2></div>
+        <p class="hint">
+          归因靠请求的出口 IP，而出口 IP 要先测速才知道，所以总会有一部分请求归不到具体节点。
+          另外「无可用节点时」设为<strong>直连</strong>时，命中规则却实际走了直连的请求也归不上 ——
+          所以「无法归因」的数字异常大，往往说明代理根本没转发成功。这两种情况都单列在上面的
+          「无法归因」里，不会硬塞给某个节点。
+        </p>
+        <div class="table-wrap">
+          <table id="nodeUsageTable">
+            <thead>
+              <tr>
+                <th scope="col">节点</th>
+                <th scope="col">使用次数</th>
+                <th scope="col">成功</th>
+                <th scope="col">失败</th>
+                <th scope="col">成功率</th>
+                <th scope="col">占比</th>
+              </tr>
+            </thead>
+            <tbody id="nodeUsageBody"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="nodeUsageEmpty" hidden>还没有走代理的请求。开启后访问漫画页即可看到分布。</p>
+      </section>
+
+      <section class="card">
+        <div class="card__head"><h2>规则命中</h2></div>
+        <p class="hint">
+          命中 0 次的规则要么写错了、要么根本没有匹配的请求 —— 两种都值得查一下。
+          可以在「规则」分区用规则测试器验证。
+        </p>
+        <div class="table-wrap">
+          <table id="ruleHitTable">
+            <thead>
+              <tr>
+                <th scope="col">规则</th>
+                <th scope="col">类型</th>
+                <th scope="col">规则内容</th>
+                <th scope="col">命中</th>
+                <th scope="col">占比</th>
+              </tr>
+            </thead>
+            <tbody id="ruleHitBody"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="ruleHitEmpty" hidden>还没有规则。没有规则时所有请求都直连。</p>
+      </section>
+    </section>
+
 
     <!-- ==================== 节点 ==================== -->
     <section class="panel" id="panelNodes" aria-labelledby="nodesTitle">
@@ -156,6 +237,7 @@
           </table>
         </div>
         <p class="empty" id="ruleEmpty" hidden>还没有规则。没有规则时所有请求都直连，扩展不会生效。</p>
+        <div class="stack" id="ruleWarnings"></div>
       </section>
 
       <section class="card">

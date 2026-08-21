@@ -11,6 +11,7 @@
  */
 
 import { SUPPORTED_PROTOCOLS, PAC_KEYWORDS, PROTOCOL_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from './constants.js';
+import { toAsciiHost } from './ascii.js';
 import { stableId } from './hash.js';
 import { normalizeNode } from './schema.js';
 
@@ -81,8 +82,10 @@ export function pacToken(node) {
   const keyword = PAC_KEYWORDS[node.protocol];
   if (!keyword) return null;
 
+  // 中文域名必须转成 Punycode：PAC 产物只能是纯 ASCII，否则整份脚本注入失败
+  const ascii = toAsciiHost(node.host);
   // IPv6 字面量在 PAC 里必须带方括号，否则端口无法区分
-  const host = node.host.includes(':') ? `[${node.host}]` : node.host;
+  const host = ascii.includes(':') && !ascii.startsWith('[') ? `[${ascii}]` : ascii;
   return `${keyword} ${host}:${node.port}`;
 }
 

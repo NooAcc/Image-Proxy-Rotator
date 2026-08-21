@@ -163,3 +163,28 @@ test('设置页侧栏的 hash 与 JS 的分区表逐项对齐', () => {
       `hash "${hash}" 与元素 id 同名，浏览器会触发锚点滚动，把标题顶到 sticky 导航底下`);
   }
 });
+
+test('弹窗分段控件的按钮数、CSS 列数与 JS 视图表三处一致', () => {
+  // 加一个视图要同时改三个地方：HTML 的按钮、CSS 的 repeat(N)、popup.js 的 VIEWS。
+  // 漏改 CSS 不会报任何错，只会把最后一个按钮挤出容器 —— 所以把三者钉在一起。
+  const html = read('popup', 'popup.html');
+  const css = read('popup', 'popup.css');
+  const js = read('popup', 'popup.js');
+
+  const buttons = [...html.matchAll(/class="seg" id="(\w+)"/g)].map((m) => m[1]);
+  const views = [...js.matchAll(/\{\s*key:\s*'[^']+',\s*tab:\s*'(\w+)'/g)].map((m) => m[1]);
+  const columns = Number(/\.segmented\s*\{[^}]*repeat\((\d+),/.exec(css)?.[1]);
+
+  assert.ok(buttons.length >= 3, '分段控件至少该有三个按钮');
+  assert.deepEqual(views, buttons, 'popup.js 的 VIEWS 顺序必须与 HTML 里的按钮顺序一致');
+  assert.equal(columns, buttons.length,
+    `.segmented 的 grid 列数是 ${columns}，但分段控件里有 ${buttons.length} 个按钮`);
+});
+
+test('设置页默认落在统计分区', () => {
+  // 这是一条刻意的决定（运行状态不该藏在导航后面），不是巧合 ——
+  // 钉住它，将来要改就得是明确的改动，而不是重排 PANELS 时的副作用
+  const js = read('options', 'options.js');
+  const first = /const PANELS = \[\s*\{\s*hash:\s*'([^']+)'/.exec(js)?.[1];
+  assert.equal(first, 'stats', 'PANELS 的第一项就是打开设置页默认看到的那一屏');
+});
