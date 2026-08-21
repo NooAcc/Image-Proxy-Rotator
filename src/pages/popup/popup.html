@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>代理分流状态</title>
+  <link rel="stylesheet" href="../shared/theme.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="popup">
+
+  <header class="top">
+    <div class="title">
+      <span class="dot" id="statusDot"></span>
+      <strong id="statusText">正在加载…</strong>
+    </div>
+    <label class="switch">
+      <input type="checkbox" id="masterSwitch">
+    </label>
+  </header>
+
+  <div class="banner err" id="errorBanner" hidden></div>
+  <div class="banner warn" id="controlWarning" hidden></div>
+  <div class="banner err" id="unsupportedWarning" hidden></div>
+
+  <section class="stats">
+    <div class="stat"><span class="num" id="statTotal">–</span><span class="lbl">节点总数</span></div>
+    <div class="stat"><span class="num ok" id="statAvailable">–</span><span class="lbl">可用</span></div>
+    <div class="stat"><span class="num warn" id="statDisabled">–</span><span class="lbl">已禁用</span></div>
+    <div class="stat"><span class="num" id="statAvgLatency">–</span><span class="lbl">平均延迟</span></div>
+  </section>
+
+  <div class="btn-row actions">
+    <button class="btn primary" id="btnProbeAll">一键测速</button>
+    <button class="btn" id="btnOptions">打开设置</button>
+    <button class="btn" id="btnClearLogs">清空日志</button>
+  </div>
+
+  <section class="block">
+    <h3>节点</h3>
+    <div id="nodeList"></div>
+  </section>
+
+  <section class="block">
+    <h3>生效的规则</h3>
+    <div id="ruleList"></div>
+  </section>
+
+  <section class="block">
+    <div class="block-head">
+      <h3>最近活动</h3>
+      <select id="logFilter">
+        <option value="">全部</option>
+        <option value="kind:probe">测速</option>
+        <option value="kind:request">请求</option>
+        <option value="kind:proxy">代理</option>
+        <option value="level:error">仅错误</option>
+      </select>
+    </div>
+    <div id="logList"></div>
+  </section>
+
+</div>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

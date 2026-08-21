@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.zip
+.DS_Store
+
+# 本地工具配置，不进仓库
+.claude/

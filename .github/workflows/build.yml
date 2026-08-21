@@ -1,0 +1,139 @@
+name: 构建与发布
+
+# 何时跑：
+#   · 推送到主分支 / 提 PR  → 验证 + 打包（产物进 Artifacts，便于评审时直接装上试）
+#   · 推 v* 标签            → 上面全部 + 建 Release 并附上产物
+#   · 手动触发              → 同 PR
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 默认只给读权限；建 Release 的写权限单独在那个 job 里放开
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: 验证（Node ${{ matrix.node }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 本项目零依赖，故意不跑 npm install / npm ci：
+      # 没有 package-lock.json，npm ci 只会失败，而我们也确实不需要装任何东西。
+      - name: 确认没有引入运行时依赖
+        run: |
+          node -e '
+            const p = require("./package.json");
+            const deps = { ...p.dependencies, ...p.devDependencies };
+            if (Object.keys(deps).length > 0) {
+              console.error("✖ 本项目不允许引入依赖，但发现：", deps);
+              process.exit(1);
+            }
+            console.log("✔ 零依赖");
+          '
+
+      - name: 单元 / 集成 / 后台 / 打包测试
+        run: npm test
+
+      - name: 静态校验（manifest 引用、ESM 路径、命名导出、消息契约、架构约束）
+        run: npm run check
+
+      - name: 图标可复现（重新生成后不应有差异）
+        run: |
+          npm run icons
+          if [ -n "$(git status --porcelain src/assets/icons)" ]; then
+            echo "✖ 重新生成图标后出现差异：提交的 PNG 与生成器不一致"
+            git --no-pager diff --stat src/assets/icons
+            exit 1
+          fi
+          echo "✔ 图标与生成器一致"
+
+  package:
+    name: 打包
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 打 tag 时需要建 Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 读出版本号
+        id: meta
+        run: echo "version=$(node -p "require('./manifest.json').version")" >> "$GITHUB_OUTPUT"
+
+      # 打 tag 发布时 tag 必须与 manifest 版本一致。这里只校验、绝不自动改文件 ——
+      # 否则会出现「发布产物的版本号和仓库里的对不上」这种事后无法追查的情况。
+      - name: 校验 tag 与 manifest 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node tools/pack.mjs --check-version "${GITHUB_REF_NAME#v}"
+
+      - name: 打 zip
+        run: npm run pack
+
+      - name: 校验产物可解压且内容完整
+        run: |
+          python3 - <<'PY'
+          import glob, zipfile, sys
+          path = glob.glob('dist/*.zip')[0]
+          z = zipfile.ZipFile(path)
+          bad = z.testzip()
+          if bad:
+              sys.exit(f'FAIL: {path} 中 {bad} CRC 校验失败')
+          names = z.namelist()
+          for must in ['manifest.json', 'src/background/service-worker.js']:
+              if must not in names:
+                  sys.exit(f'FAIL: 包内缺少 {must}')
+          if any(n.startswith(('tests/', 'tools/', 'docs/')) for n in names):
+              sys.exit('FAIL: 包里混进了开发文件')
+          print(f'OK: {path} 共 {len(names)} 个文件，解压校验通过')
+          PY
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: page-proxy-${{ steps.meta.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      # 用 runner 预装的 gh CLI，而不是第三方 action —— 少一份供应链依赖
+      - name: 建 Release 并附上产物
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NOTES=$(cat <<'EOF'
+          ## 安装方式
+
+          下载 `page-proxy-*.zip` → 解压 → Edge 打开 `edge://extensions`
+          → 开启「开发人员模式」→「加载解压缩」→ 选解压出来的目录（Chrome 同理，
+          地址是 `chrome://extensions`）。
+
+          安装后先加节点 → 加规则 → 一键测速，**最后**再打开总开关。详见 README。
+
+          > 只支持 HTTP / HTTPS 代理。粘贴 SOCKS / VLESS / Hysteria2 等类型会被明确提示并拒绝入库。
+          EOF
+          )
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --notes "$NOTES"

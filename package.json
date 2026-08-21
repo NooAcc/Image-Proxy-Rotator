@@ -1,0 +1,15 @@
+{
+  "name": "page-proxy",
+  "version": "1.0.0",
+  "description": "漫画图片代理分流 Edge 扩展",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test \"tests/*.test.js\"",
+    "check": "node tools/check-manifest.mjs",
+    "icons": "node tools/make-icons.mjs",
+    "pack": "node tools/pack.mjs",
+    "verify": "npm test && npm run check",
+    "release": "npm run verify && npm run pack"
+  }
+}

@@ -1,0 +1,83 @@
+/* 设置页专属布局 */
+
+.page {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 20px 16px 48px;
+}
+
+.mt {
+  margin-top: 14px;
+}
+
+#nodeInput,
+#configText {
+  font-family: "Cascadia Code", "Consolas", "SF Mono", ui-monospace, monospace;
+  font-size: 12.5px;
+}
+
+#nodeTable td:first-child,
+#ruleTable td:first-child {
+  width: 48px;
+}
+
+#nodeTable .name-input {
+  min-width: 110px;
+  border-color: transparent;
+  background: transparent;
+  padding: 3px 5px;
+}
+
+#nodeTable .name-input:hover {
+  border-color: var(--border);
+}
+
+#nodeTable .addr {
+  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+#nodeTable .ops,
+#ruleTable .ops {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+#ruleTable .pattern {
+  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
+  font-size: 12px;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#nodeWarnings .banner {
+  margin-top: 10px;
+  margin-bottom: 0;
+}
+
+#ruleNodes {
+  min-height: 84px;
+}
+
+#ruleTester {
+  flex: 1;
+  min-width: 240px;
+}
+
+@media (max-width: 720px) {
+  .page {
+    padding: 14px 10px 40px;
+  }
+
+  .card {
+    padding: 13px;
+  }
+
+  #ruleTable .pattern {
+    max-width: 160px;
+  }
+}

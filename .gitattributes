@@ -1,0 +1,8 @@
+# 仓库内一律用 LF 保存，避免 Windows 上 checkout 成 CRLF ——
+# 那会让 tools/pack.mjs 的「同源码必得字节相同的包」这条保证在跨平台时失效。
+* text=auto eol=lf
+
+# 二进制文件不做任何换行转换
+*.png binary
+*.zip binary
+*.crx binary

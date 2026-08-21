@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "漫画图片代理分流",
+  "short_name": "PageProxy",
+  "version": "1.0.0",
+  "description": "把匹配规则的图片请求按轮询分散到多个代理节点，绕过站点的单 IP 速率限制。",
+  "minimum_chrome_version": "108",
+  "permissions": [
+    "proxy",
+    "storage",
+    "alarms",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "options_page": "src/pages/options/options.html",
+  "action": {
+    "default_popup": "src/pages/popup/popup.html",
+    "default_title": "漫画图片代理分流",
+    "default_icon": {
+      "16": "src/assets/icons/icon16.png",
+      "32": "src/assets/icons/icon32.png",
+      "48": "src/assets/icons/icon48.png",
+      "128": "src/assets/icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "src/assets/icons/icon16.png",
+    "32": "src/assets/icons/icon32.png",
+    "48": "src/assets/icons/icon48.png",
+    "128": "src/assets/icons/icon128.png"
+  }
+}
