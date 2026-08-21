@@ -49,12 +49,13 @@ node tools/pack.mjs --check-version 1.0.0    # 只校验 manifest 版本号（CI
 
 | 事件 | 行为 |
 |---|---|
-| 推主分支 / 提 PR / 手动触发 | Node 20 + 22 上跑全部测试与静态校验 → 打 zip → 传 Artifacts |
+| 推主分支 / 提 PR / 手动触发 | Node 24 上跑全部测试与静态校验 → 打 zip → 传 Artifacts |
 | 推 `v*` 标签 | 上面全部 + 校验 tag 与 manifest 版本一致 + 建 Release 并附上 zip |
 
 它刻意**不跑 `npm install` / `npm ci`** —— 本项目零依赖，没有 `package-lock.json`，
-`npm ci` 只会失败，而我们也确实不需要装任何东西。工作流里还有一步专门校验
-`dependencies` / `devDependencies` 保持为空。
+`npm ci` 只会失败，而我们也确实不需要装任何东西。同理，`setup-node` 的
+`package-manager-cache` 显式设为 `false`（v5 起它会在检测到 `packageManager` 字段时自动开缓存）。
+工作流里还有一步专门校验 `dependencies` / `devDependencies` 保持为空。
 
 发布一个版本：
 

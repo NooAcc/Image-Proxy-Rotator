@@ -5,7 +5,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test \"tests/*.test.js\"",
+    "test": "node --test tests/*.test.js",
     "check": "node tools/check-manifest.mjs",
     "icons": "node tools/make-icons.mjs",
     "pack": "node tools/pack.mjs",

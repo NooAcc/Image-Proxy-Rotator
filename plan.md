@@ -37,7 +37,7 @@
 | 模块格式 | 全部 ESM。SW 用 `"type": "module"`；`package.json` 设 `"type": "module"` |
 | 语言 | 所有 UI 文案、注释、文档一律**简体中文** |
 | 代码风格 | 2 空格缩进；单引号；语句结尾带分号；文件末尾留一个换行 |
-| 测试命令 | `npm test` → `node --test "tests/*.test.js"` |
+| 测试命令 | `npm test` → `node --test tests/*.test.js`（**glob 不加引号**，理由见 O2） |
 | 存储键 | 配置固定存于 `chrome.storage.local` 的键 `config`；运行时态存于 `chrome.storage.session` |
 | 配置版本 | `config.version = 1`；读取必须走迁移函数，未知版本不得崩溃 |
 | 扩展名 | `漫画图片代理分流`（manifest `name`）；内部标识 `page-proxy` |
@@ -313,7 +313,7 @@ HTTP/2 连接复用的实际表现、浏览器真的弹不弹代理认证框、�
 | # | 优化 / 偏离 | 原因 |
 |---|---|---|
 | O1 | **计划外新增 2 个库文件**（原计划 9 个 lib → 实际 10 个，含删除 1 个后）：`src/lib/hash.js`、`src/lib/schema.js` | 消除重复。原计划让 `node-model`/`rule-matcher`/`storage` 各自实现哈希 → 会出现三份；规范化默认值原计划塞在 `storage.js`，但 `createNode` 也需要同一套 → 会出现两套默认值。抽出后 id 生成与默认值语义各自唯一 |
-| O2 | `npm test` 由 `node --test tests/` 改为 `node --test "tests/*.test.js"` | 本机 Windows + Node 24 下前者报 `Cannot find module '...\tests'`；改后正常，且顺带排除了 `tests/helpers/` |
+| O2 | `npm test` 最终定为 `node --test tests/*.test.js`（**glob 不加引号**） | 三次调整才收敛：① `node --test tests/` 在 Windows 上报 `Cannot find module '...\tests'`（已实测复现）；② 改成加引号的 `"tests/*.test.js"` 后 Windows 正常，但**首次 CI 就在 Linux + Node 20 上挂了** —— 引号阻止 shell 展开，而 Node 的 `--test` 自带 glob 支持要到 Node 22 才有；③ 去掉引号后四种组合全通：Linux/Git Bash 由 shell 展开，Windows 的 cmd 不展开则由 Node 22+ 自己展开。顺带仍然排除了 `tests/helpers/` |
 | O3 | `createRule` 不再复用 `normalizeRule` | 复用会**静默丢弃**非法规则，UI 就拿不到「哪里错了」。改为 `createRule` 只构造形状（宽松），`validateRule` 作为唯一裁决者并返回可展示的中文原因 |
 | O4 | **不执行 `git init` 与任何 `git commit`** | 当前目录不是 git 仓库，用户也未要求版本控制。各任务的检查点改为「跑一次 `npm run verify` 确认全绿」。用户若需要版本控制，`git init` 后一次性提交即可 |
 | O5 | `tools/check-manifest.mjs` 增加 **2 项静态检查**：③ 命名导入必须真的被目标模块导出；④ UI 侧每个 `send('type')` 都必须有对应 handler | 这两类错误浏览器**只会静默不启动 SW / 什么都不做**，极难排查。本次变更中它们真的各抓到一次：删掉 `needsBridge` 后残留的导入、删掉 `getSingbox` 后残留的调用 |
@@ -627,7 +627,7 @@ page-proxy/
 - [x] 用 Python 的 `zipfile` 独立复核过产物：CRC 全通过、30 个条目内容与源文件完全一致、
       未混入 `tests/` `tools/` `docs/` `*.md`
 - [x] `.github/workflows/build.yml`：
-      `verify` job 在 Node 20 与 22 上跑 `npm test` + `npm run check`，并额外校验
+      `verify` job 在 Node 24 上跑 `npm test` + `npm run check`，并额外校验
       **依赖表保持为空**、**图标可复现**（重新生成后不得有 diff）；
       `package` job 打 zip → 用 Python 复核可解压 → 传 Artifacts；
       打 `v*` 标签时先校验 tag 与 manifest 版本一致，再用预装的 `gh` CLI 建 Release
@@ -920,7 +920,7 @@ PAC 注入参数与路由决策、测速强制路由、连续失败自动禁用�
 - `tests/pack.test.js`（5 个）：用**另写一份**的 zip 解析器把包拆回来逐字节比对，
   刻意不复用 `pack.mjs` 的任何代码，避免「用同一个 bug 验证自己」。
   另用 Python `zipfile` 独立复核：CRC 全通过、30 个条目与源文件一致、无开发文件混入。
-- `.github/workflows/build.yml`：`verify`（Node 20 + 22 跑测试与静态校验，
+- `.github/workflows/build.yml`：`verify`（Node 24 跑测试与静态校验，
   外加**依赖表必须为空**、**图标必须可复现**两项守卫）→ `package`（打 zip、
   用 Python 复核可解压、传 Artifacts）→ 打 `v*` 标签时校验 tag 与 manifest 版本一致，
   再用预装的 `gh` CLI 建 Release。刻意不跑 `npm ci`（零依赖、无 lockfile），
@@ -931,3 +931,24 @@ PAC 注入参数与路由决策、测速强制路由、连续失败自动禁用�
 **验证**：`npm run release` → **169 passed / 0 failed** + manifest 校验通过 + zip 产出成功；
 工作流 YAML 用 `yaml.safe_load` 解析通过，其中每个 shell 步骤都在本地逐条模拟跑过
 （含版本号一致与不一致两条分支）。
+
+### 2026-08-21 —— 初始化 git 并公开发布到 GitHub
+
+- **发布前安全扫描**：全仓扫过 IP:端口 与 `user:pass@` 形式的疑似真实凭据，
+  命中的全部是占位示例（`1.2.3.4`、`10.0.0.x`、`*.example.com`、`user:pass`），确认无真实节点或密码。
+- `git init -b main` → 首次提交 57 个文件 → `gh repo create` 建**公开**仓库
+  <https://github.com/NooAcc/page-proxy> 并推送。过程文档（`plan.md` / `task.md` / `task-change.md`）
+  按用户选择一并上传。
+- **两处发布前修正**：
+  - `.claude/settings.json`（本地工具配置）已从暂存区移除并加进 `.gitignore`。
+  - 新增 `.gitattributes`（`* text=auto eol=lf`，PNG/ZIP 标 binary）。不加这条，
+    Windows 上 clone 会把源码转成 CRLF，`tools/pack.mjs` 那句「同源码必得字节相同的包」就不成立了。
+- **首次 CI 就抓到一个本地测不出来的问题**（正是加 CI 的价值）：
+  `node --test "tests/*.test.js"` 在 Linux + Node 20 上报 `Could not find '.../tests/*.test.js'` ——
+  引号阻止了 shell 展开，而 Node 自带的 `--test` glob 支持要到 Node 22 才有。
+  去掉引号后四种组合全通（见 O2 已更新的记录）。
+- **按用户要求升级 CI**：`actions/checkout@v4 → v7`、`actions/setup-node@v4 → v7`、
+  `actions/upload-artifact@v4 → v7`（版本号是用 `gh api` 查的实际最新发布，不靠记忆），
+  Node 版本矩阵收敛为单一 **Node 24**。
+  升级时读了 v5 的 breaking changes，发现 `setup-node` v5 起会在检测到 `packageManager` 字段时
+  **自动开启依赖缓存** —— 本项目零依赖、无 lockfile，因此显式设 `package-manager-cache: false`。

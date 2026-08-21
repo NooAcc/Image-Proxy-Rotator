@@ -21,18 +21,17 @@ concurrency:
 
 jobs:
   verify:
-    name: 验证（Node ${{ matrix.node }}）
+    name: 验证
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['20', '22']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '24'
+          # setup-node v5+ 会在 package.json 有 packageManager 字段时自动开缓存。
+          # 本项目零依赖、无 lockfile，缓存没有意义，显式关掉免得将来踩坑。
+          package-manager-cache: false
 
       # 本项目零依赖，故意不跑 npm install / npm ci：
       # 没有 package-lock.json，npm ci 只会失败，而我们也确实不需要装任何东西。
@@ -71,11 +70,12 @@ jobs:
     permissions:
       contents: write # 打 tag 时需要建 Release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
+          package-manager-cache: false
 
       - name: 读出版本号
         id: meta
@@ -109,7 +109,7 @@ jobs:
           PY
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: page-proxy-${{ steps.meta.outputs.version }}
           path: dist/
