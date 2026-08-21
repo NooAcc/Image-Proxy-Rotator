@@ -40,7 +40,10 @@
 | 测试命令 | `npm test` → `node --test tests/*.test.js`（**glob 不加引号**，理由见 O2） |
 | 存储键 | 配置固定存于 `chrome.storage.local` 的键 `config`；运行时态存于 `chrome.storage.session` |
 | 配置版本 | `config.version = 1`；读取必须走迁移函数，未知版本不得崩溃 |
-| 扩展名 | `漫画图片代理分流`（manifest `name`）；内部标识 `page-proxy` |
+| 扩展名 | `漫画图片代理分流`（manifest `name`）；`short_name` 为 `图片代理分流` |
+| 内部标识 | `image-proxy-rotator`（package name / zip 前缀 / 导出配置的 `exportedFrom`）。**例外**：PAC 与 alarm 的线上标识 `__pp_node` / `pp-probe` 保持 `pp` 前缀不变（PAC 依赖字面量，见下） |
+| 许可证 | MIT（`LICENSE`，版权归 NooAcc） |
+| 仓库 | <https://github.com/NooAcc/Image-Proxy-Rotator>（公开） |
 | id 前缀 | 节点 `n_` + 8 位 hex；规则 `r_` + 8 位 hex（稳定哈希，非随机） |
 | 探测标记参数 | `__pp_node`（PAC 依赖此字面量，不得改名） |
 | 日志上限 | 默认 200 条，环形缓冲，最新在前 |
@@ -334,9 +337,10 @@ HTTP/2 连接复用的实际表现、浏览器真的弹不弹代理认证框、�
 ## 6. 文件结构（与磁盘实际一致）
 
 ```
-page-proxy/
+Image-Proxy-Rotator/
 ├── plan.md                       # 本计划（持续更新）
 ├── task.md  task-change.md       # 需求与变更（只读）
+├── LICENSE                       # MIT
 ├── README.md                     # 安装 / 使用说明
 ├── package.json                  # 仅脚本，dependencies 为空
 ├── .gitignore
@@ -937,7 +941,7 @@ PAC 注入参数与路由决策、测速强制路由、连续失败自动禁用�
 - **发布前安全扫描**：全仓扫过 IP:端口 与 `user:pass@` 形式的疑似真实凭据，
   命中的全部是占位示例（`1.2.3.4`、`10.0.0.x`、`*.example.com`、`user:pass`），确认无真实节点或密码。
 - `git init -b main` → 首次提交 57 个文件 → `gh repo create` 建**公开**仓库
-  <https://github.com/NooAcc/page-proxy> 并推送。过程文档（`plan.md` / `task.md` / `task-change.md`）
+  <https://github.com/NooAcc/Image-Proxy-Rotator>（当时名为 page-proxy，后已改名） 并推送。过程文档（`plan.md` / `task.md` / `task-change.md`）
   按用户选择一并上传。
 - **两处发布前修正**：
   - `.claude/settings.json`（本地工具配置）已从暂存区移除并加进 `.gitignore`。
@@ -952,3 +956,43 @@ PAC 注入参数与路由决策、测速强制路由、连续失败自动禁用�
   Node 版本矩阵收敛为单一 **Node 24**。
   升级时读了 v5 的 breaking changes，发现 `setup-node` v5 起会在检测到 `packageManager` 字段时
   **自动开启依赖缓存** —— 本项目零依赖、无 lockfile，因此显式设 `package-manager-cache: false`。
+
+### 2026-08-21 —— 改名、加 MIT 许可证、每次构建自动发布 Release
+
+**1. 仓库改名**：`page-proxy` → **`Image-Proxy-Rotator`**（用户从四个候选里选定）。
+原名容易被读成「代理整个页面」，新名字把「图片 + 代理 + 轮询」三个要素说清了，
+且不把用途锁死在漫画站（规则本来就是用户自配的）。
+
+- `gh repo rename` 同时自动更新了本地 remote。
+- **内部标识一并同步**为 `image-proxy-rotator`（原为 `page-proxy`）：`package.json` 的 name、
+  zip 文件名前缀、导出配置里的 `exportedFrom`、导出配置的下载文件名、CI 的 artifact 名。
+  `manifest.json` 的 `short_name` 由 `PageProxy` 改为 `图片代理分流`（与「UI 全中文」这条约束一致）。
+- **刻意保留 `pp` 前缀的两处**：`PROBE_PARAM = '__pp_node'` 与 `ALARM_PROBE = 'pp-probe'`。
+  全局约束里本就写明 PAC 依赖 `__pp_node` 这个字面量、不得改名；它们是线上标识而非展示名称，
+  改动只有风险没有收益。已在约束表里把这条例外写清。
+- 本地工作目录仍叫 `page-proxy` —— git 不关心目录名，改名会打断当前会话的路径，留给用户自行处理。
+
+**2. MIT 许可证**：新增 `LICENSE`（版权 2026 NooAcc），`package.json` 加 `license: "MIT"`
+与 `repository` / `homepage`，README 末尾加「许可证」小节并在顶部加了 CI 与 License 徽章。
+公开仓库若无许可证等于「保留所有权利」，别人不能合法复用 —— 这是发布后必须补的一环。
+
+**3. 每次构建自动发布 Release**（用户从三个方案里选了「每次构建建独立预发布」）
+
+| 事件 | 行为 |
+|---|---|
+| 推主分支 / 手动触发 | 发预发布 `v<版本>-build.<运行号>` |
+| 推 `v*` 标签 | 发正式版（`--latest`），且先校验 tag 与 manifest 版本一致 |
+| 提 PR | 只验证与打包，**不发布**（fork token 无写权限，且会刷爆 release 列表） |
+
+- **重跑幂等性**：重跑同一次工作流时 `run_number` 不变会撞 tag。刻意区别对待 ——
+  开发构建直接 `gh release delete --cleanup-tag` 后重建；**正式版绝不删除**，
+  改为 `gh release upload --clobber` 覆盖资产。这条区分是防止一次重跑就把已发布的正式版抹掉。
+- **不自动清理旧预发布**：release 列表会随提交增长，但删除是不可逆操作，工作流不碰；
+  `docs/PACKAGING.md` 给出手动清理命令。
+- **本地验证了全部四条分支**：把工作流里的 release 脚本用 `yaml.safe_load` 抽出来，
+  配一个假 `gh` 记录调用，跑了「推 main / 推 tag / 重跑开发构建 / 正式版已存在」四种场景，
+  确认 tag 名、标题、`--prerelease` 与 `--latest` 的取值、以及删除与覆盖两条路径都符合预期。
+  顺带验证了 heredoc 在 YAML 块标量里缩进正确、反引号未被当成命令替换。
+
+**验证**：`npm run release` → **169 passed / 0 failed** + manifest 校验通过 +
+`dist/image-proxy-rotator-1.0.0.zip` 产出成功。

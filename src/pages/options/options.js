@@ -489,7 +489,7 @@ for (const id of ['strategy', 'fallback', 'rotateEvery', 'probeUrl', 'probeTimeo
 $('btnExportFile').addEventListener('click', async () => {
   await guard(async () => {
     const res = await send('exportConfig');
-    downloadText(`page-proxy-config-${fileStamp()}.json`, res.text);
+    downloadText(`image-proxy-rotator-config-${fileStamp()}.json`, res.text);
   }, 'ioError');
 });
 

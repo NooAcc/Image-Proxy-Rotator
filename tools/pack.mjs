@@ -175,7 +175,7 @@ function main(argv) {
 
   const entries = collectFiles();
   const zip = buildZip(entries);
-  const name = `page-proxy-${version}.zip`;
+  const name = `image-proxy-rotator-${version}.zip`;
   writeFileSync(join(outDir, name), zip);
 
   console.log(`✔ ${args.out}/${name}（${entries.length} 个文件，${(zip.length / 1024).toFixed(1)} KB）`);

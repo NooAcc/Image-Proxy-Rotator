@@ -111,29 +111,69 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v7
         with:
-          name: page-proxy-${{ steps.meta.outputs.version }}
+          name: image-proxy-rotator-${{ steps.meta.outputs.version }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
 
-      # 用 runner 预装的 gh CLI，而不是第三方 action —— 少一份供应链依赖
-      - name: 建 Release 并附上产物
-        if: startsWith(github.ref, 'refs/tags/v')
+      # 每次构建都发一个 Release：
+      #   · 推 v* tag  → 正式版，标题就是 tag，标记为 latest
+      #   · 其余推送   → 预发布 v<版本>-build.<运行号>，不占用 latest
+      # PR 不发布（fork 的 token 没有写权限，而且会把 release 列表刷爆）。
+      # 用 runner 预装的 gh CLI 而不是第三方 action，少一份供应链依赖。
+      - name: 发布 Release 并附上产物
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          SHA: ${{ github.sha }}
         run: |
-          NOTES=$(cat <<'EOF'
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            TITLE="${GITHUB_REF_NAME}"
+            EXTRA=(--latest)
+            KIND="正式版"
+          else
+            TAG="v${VERSION}-build.${RUN_NUMBER}"
+            TITLE="v${VERSION} 构建 #${RUN_NUMBER}"
+            EXTRA=(--prerelease)
+            KIND="开发构建"
+          fi
+
+          NOTES=$(cat <<EOF
+          **${KIND}** · 版本 ${VERSION} · 提交 \`${SHA:0:7}\`
+
           ## 安装方式
 
-          下载 `page-proxy-*.zip` → 解压 → Edge 打开 `edge://extensions`
-          → 开启「开发人员模式」→「加载解压缩」→ 选解压出来的目录（Chrome 同理，
-          地址是 `chrome://extensions`）。
+          下载下方的 \`image-proxy-rotator-*.zip\` → 解压 → Edge 打开 \`edge://extensions\`
+          → 开启「开发人员模式」→「加载解压缩」→ 选解压出来的目录
+          （Chrome 同理，地址是 \`chrome://extensions\`）。
 
           安装后先加节点 → 加规则 → 一键测速，**最后**再打开总开关。详见 README。
 
           > 只支持 HTTP / HTTPS 代理。粘贴 SOCKS / VLESS / Hysteria2 等类型会被明确提示并拒绝入库。
           EOF
           )
-          gh release create "${{ github.ref_name }}" dist/* \
-            --title "${{ github.ref_name }}" \
-            --notes "$NOTES"
+
+          # 重跑同一次工作流时 run_number 不变，会撞上已存在的 tag。
+          # 开发构建可以安全地重建；正式版则改为覆盖资产，绝不删除已发布的正式 Release。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [[ "$KIND" == "开发构建" ]]; then
+              echo "ℹ $TAG 已存在（应为重跑），删除后重建"
+              gh release delete "$TAG" --yes --cleanup-tag
+            else
+              echo "ℹ 正式版 $TAG 已存在，改为覆盖上传资产"
+              gh release upload "$TAG" dist/* --clobber
+              exit 0
+            fi
+          fi
+
+          gh release create "$TAG" dist/* \
+            --title "$TITLE" \
+            --notes "$NOTES" \
+            --target "$SHA" \
+            "${EXTRA[@]}"
+          echo "✔ 已发布 $KIND：$TAG"

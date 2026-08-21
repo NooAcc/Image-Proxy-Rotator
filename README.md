@@ -1,4 +1,7 @@
-# 漫画图片代理分流（page-proxy）
+# 漫画图片代理分流（Image-Proxy-Rotator）
+
+[![构建与发布](https://github.com/NooAcc/Image-Proxy-Rotator/actions/workflows/build.yml/badge.svg)](https://github.com/NooAcc/Image-Proxy-Rotator/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 一个 Manifest V3 的 Edge / Chrome 扩展：把匹配规则的图片请求按**轮询**分散到多个
 **HTTP / HTTPS 代理**上，绕过漫画站的单 IP 速率限制。
@@ -15,16 +18,33 @@
 
 ## 安装
 
-本扩展零依赖、零构建，源码即产物。
+本扩展零依赖、零构建，源码即产物。两种装法任选：
+
+**A. 下载现成的包**（推荐给只想用的人）
+
+到 [Releases](https://github.com/NooAcc/Image-Proxy-Rotator/releases) 下载
+`image-proxy-rotator-*.zip` 并解压。标着 `Pre-release` 的是每次提交自动构建的开发版，
+不带该标记的是正式版。
+
+**B. 直接克隆源码**
+
+```bash
+git clone https://github.com/NooAcc/Image-Proxy-Rotator.git
+```
+
+然后加载（两种方式都一样）：
 
 **Edge**
 1. 打开 `edge://extensions`
 2. 打开左下角「开发人员模式」
-3. 点「加载解压缩的扩展」，选择本仓库根目录（含 `manifest.json` 的那一层）
+3. 点「加载解压缩的扩展」，选择解压出来的目录 / 仓库根目录（含 `manifest.json` 的那一层）
 
 **Chrome**：同理，地址是 `chrome://extensions`，按钮叫「加载已解压的扩展程序」。
 
 装好后工具栏会出现一个分流图标，点它打开状态面板。
+
+> `.crx` 不提供 —— 开发人员模式解锁的是「加载解压缩」，并不等于允许安装本地 crx，
+> 自签名 crx 会被现代 Chromium 以缺少商店签名为由拒绝。详见 [docs/PACKAGING.md](docs/PACKAGING.md)。
 
 ---
 
@@ -169,7 +189,7 @@ npm test      # 运行全部 169 个测试（node --test，零依赖）
 npm run check # 静态校验：manifest 引用、ESM 路径、命名导入、消息契约、架构约束
 npm run icons # 重新生成图标 PNG
 npm run verify # 上面两项一起跑
-npm run pack  # 打包成 dist/page-proxy-<版本>.zip（分发 / 上架用）
+npm run pack  # 打包成 dist/image-proxy-rotator-<版本>.zip（分发 / 上架用）
 npm run release # verify + pack
 ```
 
@@ -193,3 +213,11 @@ docs/                  架构说明与技术限制
 用来验证「测速失败 → 自动禁用 → 重新注入的 PAC 不再选中该节点」这类跨模块行为。
 
 细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；打包与自动构建见 [docs/PACKAGING.md](docs/PACKAGING.md)。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © 2026 NooAcc
+
+可自由使用、修改、分发与商用，只需保留版权声明与许可声明。软件按「原样」提供，不含任何担保。

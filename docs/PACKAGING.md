@@ -8,7 +8,7 @@
 
 | 想干什么 | 做法 |
 |---|---|
-| 自己用 / 给别人装 | `npm run pack` → 把 `dist/page-proxy-<版本>.zip` 发出去，对方解压后「加载解压缩」 |
+| 自己用 / 给别人装 | `npm run pack` → 把 `dist/image-proxy-rotator-<版本>.zip` 发出去，对方解压后「加载解压缩」 |
 | 上架 Edge 加载项 / Chrome 应用商店 | 同一个 zip 直接上传，商店要的就是它 |
 
 **不产出 `.crx`**：开发人员模式解锁的是「加载解压缩」，不等于「安装本地 crx」——
@@ -49,8 +49,18 @@ node tools/pack.mjs --check-version 1.0.0    # 只校验 manifest 版本号（CI
 
 | 事件 | 行为 |
 |---|---|
-| 推主分支 / 提 PR / 手动触发 | Node 24 上跑全部测试与静态校验 → 打 zip → 传 Artifacts |
-| 推 `v*` 标签 | 上面全部 + 校验 tag 与 manifest 版本一致 + 建 Release 并附上 zip |
+| 推主分支 / 手动触发 | Node 24 跑全部测试与静态校验 → 打 zip → 传 Artifacts → **发一个预发布** `v<版本>-build.<运行号>` |
+| 推 `v*` 标签 | 上面全部 + 校验 tag 与 manifest 版本一致 → 发**正式版**（标记为 latest） |
+| 提 PR | 只跑验证与打包，**不发布**（fork 的 token 没有写权限，而且会把 release 列表刷爆） |
+
+也就是说**每次构建都会产出一个可下载的 Release**：带 `Pre-release` 标记的是开发构建，
+不带的是正式版。两者的资产完全同构，都是 `image-proxy-rotator-<版本>.zip`。
+
+重跑同一次工作流时 `run_number` 不变，会撞上已存在的 tag。处理方式刻意区别对待：
+**开发构建**直接删掉重建（幂等）；**正式版**绝不删除，改为用 `--clobber` 覆盖上传资产。
+
+> 开发构建的 release 会随提交数不断增长。要清理旧的预发布，可以手动
+> `gh release delete v1.0.0-build.<N> --yes --cleanup-tag`；工作流刻意不自动删任何东西。
 
 它刻意**不跑 `npm install` / `npm ci`** —— 本项目零依赖，没有 `package-lock.json`，
 `npm ci` 只会失败，而我们也确实不需要装任何东西。同理，`setup-node` 的

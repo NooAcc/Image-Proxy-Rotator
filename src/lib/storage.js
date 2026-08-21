@@ -78,7 +78,7 @@ export function exportConfig(config) {
   const normalized = normalizeConfig(config);
   const payload = {
     version: CONFIG_VERSION,
-    exportedFrom: 'page-proxy',
+    exportedFrom: 'image-proxy-rotator',
     enabled: normalized.enabled,
     settings: normalized.settings,
     nodes: normalized.nodes.map((n) => ({
