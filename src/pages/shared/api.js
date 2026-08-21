@@ -1,7 +1,8 @@
 /**
- * 页面侧与后台通信的封装，以及一些共用的展示辅助函数。
+ * 页面侧与后台通信的封装，以及一些共用的格式化辅助函数。
  *
  * 页面**不维护第二份状态**：写操作的返回值里带着新的 config，直接拿它重渲染。
+ * 展示组件（徽标、状态指示器、按钮）在 shared/ui.js，这里只管通信与格式化。
  */
 
 /**
@@ -49,29 +50,6 @@ export function fmtAgo(ms) {
   return `${Math.round(diff / 86400000)} 天前`;
 }
 
-/** 健康状态 → 中文 */
-export function healthLabel(node) {
-  if (!node.enabled) return '已手动禁用';
-  if (node.autoDisabled) return '已自动禁用';
-  switch (node.health?.status) {
-    case 'ok': return '正常';
-    case 'slow': return '偏慢';
-    case 'fail': return '失败';
-    default: return '未测速';
-  }
-}
-
-/** 健康状态 → 圆点 class */
-export function healthDotClass(node) {
-  if (!node.enabled || node.autoDisabled) return 'off';
-  switch (node.health?.status) {
-    case 'ok': return 'ok';
-    case 'slow': return 'slow';
-    case 'fail': return 'fail';
-    default: return '';
-  }
-}
-
 /**
  * 轻量 DOM 构造器。
  * 全程使用 textContent / setAttribute，绝不拼 innerHTML —— 节点名和规则都来自
@@ -107,19 +85,6 @@ export function el(tag, props = {}, ...children) {
 /** 清空一个容器 */
 export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
-}
-
-/** 在 banner 元素上显示消息；message 为空则隐藏 */
-export function showBanner(node, message, level = 'err') {
-  if (!node) return;
-  if (!message) {
-    node.hidden = true;
-    node.textContent = '';
-    return;
-  }
-  node.hidden = false;
-  node.className = `banner ${level}`;
-  node.textContent = message;
 }
 
 /** 防抖 */

@@ -2,231 +2,297 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <title>漫画图片代理分流 · 设置</title>
-  <link rel="stylesheet" href="../shared/theme.css">
+  <title>图片代理分流 · 设置</title>
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <link rel="stylesheet" href="../shared/components.css">
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
-<main class="page">
 
-  <!-- ============ 总开关与状态 ============ -->
-  <section class="card">
-    <header>
-      <h1>漫画图片代理分流</h1>
-      <label class="switch">
-        <input type="checkbox" id="masterSwitch">
-        <span id="masterLabel">总开关</span>
-      </label>
-    </header>
-    <div class="banner err" id="globalError" hidden></div>
-    <div class="banner warn" id="controlWarning" hidden></div>
-    <p class="hint" id="summaryText">正在加载…</p>
-  </section>
+<!-- 状态常驻顶栏：运行状态不该是「先导航才看得到」的一页 -->
+<header class="topbar">
+  <span class="topbar__brand">图片代理分流</span>
+  <p class="topbar__summary num" id="summaryText" role="status">正在加载…</p>
+  <label class="switch topbar__switch">
+    <input type="checkbox" id="masterSwitch">
+    <span id="masterLabel">总开关</span>
+  </label>
+</header>
 
-  <!-- ============ 代理节点 ============ -->
-  <section class="card">
-    <header>
-      <h2>代理节点</h2>
-      <div class="btn-row">
-        <button class="btn" id="btnProbeAll">一键测速</button>
-        <button class="btn" id="btnEnableAll">全部启用</button>
-        <button class="btn danger" id="btnDeleteUnsupported" hidden>清除不支持的节点</button>
-        <button class="btn danger" id="btnDeleteDisabled">删除已禁用</button>
-      </div>
-    </header>
+<!-- 全局告警区：不属于任何分区，切到哪一页都看得到 -->
+<div class="alerts">
+  <div class="banner banner--err" id="globalError" hidden></div>
+  <div class="banner banner--warn" id="controlWarning" hidden></div>
+</div>
 
-    <p class="hint">
-      本程序<strong>仅支持 HTTP / HTTPS 代理</strong>。每行一个节点，支持
-      <code>http://主机:端口</code>、<code>https://主机:端口</code>、
-      <code>http://用户名:密码@主机:端口</code>，
-      以及 <code>主机:端口</code> / <code>主机:端口:用户名:密码</code>（按 HTTP 处理）；
-      也可直接粘贴 base64 订阅内容。行尾可用 <code>#名称</code> 命名，以 <code>#</code> 开头的行视为注释。
-    </p>
-    <p class="hint">
-      SOCKS4 / SOCKS5 / VLESS / VMess / Hysteria2 / Trojan / Shadowsocks 等类型
-      <strong>不受支持</strong>，粘贴后会被逐条列出并忽略。
-    </p>
+<div class="shell">
+  <nav class="sidenav" aria-label="设置分区">
+    <a class="navitem" href="#nodes">节点<span class="navitem__count num" id="navCountNodes"></span></a>
+    <a class="navitem" href="#rules">规则<span class="navitem__count num" id="navCountRules"></span></a>
+    <a class="navitem" href="#routing">分流</a>
+    <a class="navitem" href="#diagnostics">诊断</a>
+  </nav>
 
-    <label class="field">
-      <span>批量导入</span>
-      <textarea id="nodeInput" rows="5" spellcheck="false"
-        placeholder="http://1.2.3.4:8080#节点A&#10;https://proxy.example.com:8443#节点B&#10;http://user:pass@5.6.7.8:3128#节点C&#10;10.0.0.5:3128"></textarea>
-    </label>
-    <div class="btn-row">
-      <button class="btn primary" id="btnAddNodes">添加节点</button>
-      <label class="check"><input type="checkbox" id="chkMerge" checked> 追加到现有列表（不勾选则替换全部）</label>
-    </div>
-    <div class="banner warn" id="importErrors" hidden></div>
+  <main class="content">
 
-    <div class="table-wrap">
-      <table id="nodeTable">
-        <thead>
-          <tr>
-            <th>启用</th>
-            <th>名称</th>
-            <th>协议</th>
-            <th>地址</th>
-            <th>延迟</th>
-            <th>状态</th>
-            <th>已用</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="nodeTableBody"></tbody>
-      </table>
-    </div>
-    <div class="empty" id="nodeEmpty" hidden>还没有节点，在上面的输入框里粘贴节点链接后点「添加节点」。</div>
-    <div id="nodeWarnings"></div>
-  </section>
+    <!-- ==================== 节点 ==================== -->
+    <section class="panel" id="panelNodes" aria-labelledby="nodesTitle">
+      <h1 id="nodesTitle" class="panel__title">节点</h1>
 
-  <!-- ============ URL 规则 ============ -->
-  <section class="card">
-    <header>
-      <h2>URL 规则</h2>
-      <div class="btn-row">
-        <button class="btn" id="btnAddPresets">插入常用预设</button>
-      </div>
-    </header>
+      <section class="card">
+        <div class="card__head"><h2>批量导入</h2></div>
+        <p class="hint">
+          仅支持 <strong>HTTP / HTTPS 代理</strong>。每行一个：<code>http://主机:端口</code>、
+          <code>http://用户名:密码@主机:端口</code>，或 <code>主机:端口</code>（按 HTTP 处理）。
+          也可直接粘贴 base64 订阅内容；行尾 <code>#名称</code> 用于命名，<code>#</code> 开头的行是注释。
+        </p>
+        <p class="hint">
+          SOCKS4 / SOCKS5 / VLESS / VMess / Hysteria2 / Trojan / Shadowsocks
+          <strong>不受支持</strong>，粘贴后会被逐条列出并忽略。
+        </p>
+        <div class="field field--stacked">
+          <label class="field__label" for="nodeInput">节点链接</label>
+          <textarea id="nodeInput" rows="5" spellcheck="false"
+            placeholder="http://1.2.3.4:8080#节点A&#10;https://proxy.example.com:8443#节点B&#10;http://user:pass@5.6.7.8:3128#节点C&#10;10.0.0.5:3128"></textarea>
+        </div>
+        <div class="btn-row">
+          <button type="button" class="btn btn--primary" id="btnAddNodes">添加节点</button>
+          <label class="check"><input type="checkbox" id="chkMerge" checked> 追加到现有列表（不勾选则替换全部）</label>
+        </div>
+        <div class="banner banner--warn" id="importErrors" hidden></div>
+      </section>
 
-    <p class="hint">
-      只有命中规则的请求才会走代理，其余请求保持直连。规则按列表顺序匹配，命中第一条即生效。
-    </p>
+      <section class="card">
+        <div class="card__head">
+          <h2>节点列表</h2>
+          <div class="btn-row">
+            <button type="button" class="btn" id="btnProbeAll">一键测速</button>
+            <button type="button" class="btn" id="btnEnableAll">全部启用</button>
+            <button type="button" class="btn btn--danger" id="btnDeleteUnsupported" hidden>清除不支持的</button>
+            <button type="button" class="btn btn--danger" id="btnDeleteDisabled">删除已禁用</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="nodeTable">
+            <thead>
+              <tr>
+                <th scope="col">启用</th>
+                <th scope="col">名称</th>
+                <th scope="col">协议</th>
+                <th scope="col">地址</th>
+                <th scope="col">延迟</th>
+                <th scope="col">状态</th>
+                <th scope="col">已用</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody id="nodeTableBody"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="nodeEmpty" hidden>还没有节点。在上面粘贴节点链接后点「添加节点」。</p>
+        <div class="stack" id="nodeWarnings"></div>
+      </section>
+    </section>
 
-    <div class="grid">
-      <label class="field">
-        <span>名称（可留空）</span>
-        <input type="text" id="ruleName" placeholder="例如：漫画图床">
-      </label>
-      <label class="field">
-        <span>类型</span>
-        <select id="ruleType">
-          <option value="regex">正则表达式</option>
-          <option value="host">域名（含子域）</option>
-          <option value="prefix">URL 前缀</option>
-          <option value="wildcard">通配符（* 匹配任意字符）</option>
-          <option value="exact">精确 URL</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>规则内容</span>
-        <input type="text" id="rulePattern" spellcheck="false" placeholder="\.(jpe?g|png|webp)$">
-      </label>
-      <label class="field">
-        <span>绑定节点（不选=使用全部可用节点）</span>
-        <select id="ruleNodes" multiple size="4"></select>
-      </label>
-    </div>
-    <div class="btn-row">
-      <button class="btn primary" id="btnSaveRule">保存规则</button>
-      <button class="btn" id="btnResetRuleForm" hidden>取消编辑</button>
-    </div>
-    <div class="banner err" id="ruleError" hidden></div>
+    <!-- ==================== 规则 ==================== -->
+    <section class="panel" id="panelRules" aria-labelledby="rulesTitle">
+      <h1 id="rulesTitle" class="panel__title">规则</h1>
 
-    <div class="table-wrap">
-      <table id="ruleTable">
-        <thead>
-          <tr>
-            <th>启用</th>
-            <th>名称</th>
-            <th>类型</th>
-            <th>规则内容</th>
-            <th>绑定节点</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody id="ruleTableBody"></tbody>
-      </table>
-    </div>
-    <div class="empty" id="ruleEmpty" hidden>还没有规则。没有规则时所有请求都直连，扩展不会生效。</div>
+      <section class="card">
+        <div class="card__head">
+          <h2 id="ruleFormTitle">新建规则</h2>
+          <button type="button" class="btn" id="btnAddPresets">插入常用预设</button>
+        </div>
+        <p class="hint">只有命中规则的请求才走代理，其余保持直连。规则按列表顺序匹配，命中第一条即生效。</p>
 
-    <h3 class="mt">规则测试器</h3>
-    <p class="hint">输入一个图片 URL，看它会不会走代理、走哪条规则。</p>
-    <div class="btn-row">
-      <input type="text" id="ruleTester" spellcheck="false" placeholder="https://cdn.manga.com/img/001.jpg">
-      <button class="btn" id="btnTestRule">测试</button>
-    </div>
-    <div class="banner info" id="ruleTestResult" hidden></div>
-  </section>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="ruleName">名称</label>
+            <input type="text" id="ruleName" placeholder="例如：漫画图床" aria-describedby="ruleNameHint">
+            <span class="field__hint" id="ruleNameHint">可留空，留空时自动用规则内容当名字。</span>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="ruleType">类型</label>
+            <select id="ruleType">
+              <option value="regex">正则表达式</option>
+              <option value="host">域名（含子域）</option>
+              <option value="prefix">URL 前缀</option>
+              <option value="wildcard">通配符（* 匹配任意字符）</option>
+              <option value="exact">精确 URL</option>
+            </select>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="rulePattern">规则内容</label>
+            <input type="text" id="rulePattern" spellcheck="false" placeholder="\.(jpe?g|png|webp)$">
+          </div>
+          <div class="field field--stacked">
+            <label class="field__label" for="ruleNodes">绑定节点（不选则使用全部可用节点）</label>
+            <select id="ruleNodes" multiple size="5"></select>
+          </div>
+        </div>
 
-  <!-- ============ 高级设置 ============ -->
-  <section class="card">
-    <header><h2>分流与测速设置</h2></header>
-    <div class="grid">
-      <label class="field">
-        <span>分流策略</span>
-        <select id="strategy">
-          <option value="round-robin">轮询（每个请求换一个节点）</option>
-          <option value="hash">哈希（同一 URL 固定走同一节点）</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>无可用节点时</span>
-        <select id="fallback">
-          <option value="direct">直连（图片至少能加载）</option>
-          <option value="block">不兜底（严格只走代理）</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>每几个请求换一次节点</span>
-        <input type="number" id="rotateEvery" min="1" max="1000">
-      </label>
-      <label class="field">
-        <span>测速地址</span>
-        <input type="text" id="probeUrl" spellcheck="false">
-      </label>
-      <label class="field">
-        <span>超时（毫秒）</span>
-        <input type="number" id="probeTimeout" min="500" max="60000" step="500">
-      </label>
-      <label class="field">
-        <span>定时测速间隔（分钟，0=关闭）</span>
-        <input type="number" id="probeInterval" min="0" max="1440">
-      </label>
-      <label class="field">
-        <span>连续失败几次后自动禁用</span>
-        <input type="number" id="failureThreshold" min="1" max="10">
-      </label>
-      <label class="field">
-        <span>日志保留条数</span>
-        <input type="number" id="logLimit" min="10" max="2000" step="10">
-      </label>
-      <label class="field">
-        <span>绕过列表（逗号分隔，这些主机永不走代理）</span>
-        <input type="text" id="bypassList" spellcheck="false">
-      </label>
-    </div>
-    <div class="btn-row">
-      <label class="check"><input type="checkbox" id="autoDisable"> 自动禁用测速失败的节点</label>
-      <label class="check"><input type="checkbox" id="recoverProbe"> 定时测速也测试已自动禁用的节点（用于自动恢复）</label>
-    </div>
-    <p class="hint" id="settingsSaved"></p>
-  </section>
+        <div class="btn-row">
+          <button type="button" class="btn btn--primary" id="btnSaveRule">保存规则</button>
+          <button type="button" class="btn" id="btnResetRuleForm" hidden>取消编辑</button>
+        </div>
+        <div class="banner banner--err" id="ruleError" hidden></div>
+      </section>
 
-  <!-- ============ 导入导出与排障 ============ -->
-  <section class="card">
-    <header><h2>配置备份与排障</h2></header>
-    <div class="btn-row">
-      <button class="btn" id="btnExportFile">导出为文件</button>
-      <button class="btn" id="btnExportClipboard">复制配置</button>
-      <button class="btn" id="btnImportText">从下方文本导入</button>
-      <label class="check"><input type="checkbox" id="chkImportMerge"> 合并导入（不勾选则覆盖全部）</label>
-      <label class="btn" for="importFile">选择文件导入</label>
-      <input type="file" id="importFile" accept=".json,application/json" hidden>
-    </div>
-    <label class="field mt">
-      <span>配置 JSON</span>
-      <textarea id="configText" rows="6" spellcheck="false" placeholder="把导出的 JSON 粘贴到这里，然后点「从下方文本导入」"></textarea>
-    </label>
-    <div class="banner err" id="ioError" hidden></div>
+      <section class="card">
+        <div class="card__head"><h2>规则列表</h2></div>
+        <div class="table-wrap">
+          <table id="ruleTable">
+            <thead>
+              <tr>
+                <th scope="col">启用</th>
+                <th scope="col">名称</th>
+                <th scope="col">类型</th>
+                <th scope="col">规则内容</th>
+                <th scope="col">绑定节点</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody id="ruleTableBody"></tbody>
+          </table>
+        </div>
+        <p class="empty" id="ruleEmpty" hidden>还没有规则。没有规则时所有请求都直连，扩展不会生效。</p>
+      </section>
 
-    <details class="mt">
-      <summary>查看当前生效的 PAC 脚本（排障用）</summary>
-      <div class="btn-row mt"><button class="btn tiny" id="btnRefreshPac">刷新</button></div>
-      <pre id="pacPreview" class="mono">点「刷新」加载。</pre>
-    </details>
-  </section>
+      <section class="card">
+        <div class="card__head"><h2>规则测试器</h2></div>
+        <p class="hint">输入一个图片 URL，看它会不会走代理、命中哪条规则。</p>
+        <div class="btn-row">
+          <label class="sr-only" for="ruleTester">要测试的 URL</label>
+          <input type="text" id="ruleTester" spellcheck="false" placeholder="https://cdn.manga.com/img/001.jpg">
+          <button type="button" class="btn" id="btnTestRule">测试</button>
+        </div>
+        <div class="banner banner--info" id="ruleTestResult" hidden></div>
+      </section>
+    </section>
 
-</main>
+    <!-- ==================== 分流 ==================== -->
+    <!--
+      这一屏的每个字段都用 .field--inline：标签在左侧定宽列（--label-w），控件在右。
+      长说明一律放到控件下方的 .field__hint —— 那里有整行宽度，标签就永远不会
+      被挤到折行。旧版把「绕过列表（逗号分隔，这些主机永不走代理）」整句塞进
+      190px 宽的自适应列标签里，必然折成两行，那格输入框也就比同排其他格矮一行。
+    -->
+    <section class="panel" id="panelRouting" aria-labelledby="routingTitle">
+      <h1 id="routingTitle" class="panel__title">分流</h1>
+
+      <section class="card">
+        <div class="card__head"><h2>轮询策略</h2></div>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="strategy">分流策略</label>
+            <select id="strategy">
+              <option value="round-robin">轮询（每个请求换一个节点）</option>
+              <option value="hash">哈希（同一 URL 固定走同一节点）</option>
+            </select>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="fallback">无可用节点时</label>
+            <select id="fallback">
+              <option value="direct">直连（图片至少能加载）</option>
+              <option value="block">不兜底（严格只走代理）</option>
+            </select>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="rotateEvery">换节点频率</label>
+            <input type="number" id="rotateEvery" min="1" max="1000" aria-describedby="rotateEveryHint">
+            <span class="field__hint" id="rotateEveryHint">每几个请求换一次节点。填 1 表示每个请求都换。</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card__head"><h2>测速与健康检查</h2></div>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="probeUrl">测速地址</label>
+            <input type="text" id="probeUrl" spellcheck="false" aria-describedby="probeUrlHint">
+            <span class="field__hint" id="probeUrlHint">应当返回极小响应且允许跨域，例如返回 204 的探测端点。</span>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="probeTimeout">单次超时</label>
+            <input type="number" id="probeTimeout" min="500" max="60000" step="500" aria-describedby="probeTimeoutHint">
+            <span class="field__hint" id="probeTimeoutHint">单位毫秒。超过这个时间未响应即判定失败。</span>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="probeInterval">定时测速间隔</label>
+            <input type="number" id="probeInterval" min="0" max="1440" aria-describedby="probeIntervalHint">
+            <span class="field__hint" id="probeIntervalHint">单位分钟，填 0 关闭定时测速。</span>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="failureThreshold">失败禁用阈值</label>
+            <input type="number" id="failureThreshold" min="1" max="10" aria-describedby="failureThresholdHint">
+            <span class="field__hint" id="failureThresholdHint">连续失败几次后自动禁用该节点。</span>
+          </div>
+        </div>
+        <div class="stack">
+          <label class="check"><input type="checkbox" id="autoDisable"> 自动禁用测速失败的节点</label>
+          <label class="check"><input type="checkbox" id="recoverProbe"> 定时测速也测试已自动禁用的节点（用于自动恢复）</label>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card__head"><h2>绕过与日志</h2></div>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="bypassList">绕过列表</label>
+            <input type="text" id="bypassList" spellcheck="false" aria-describedby="bypassListHint">
+            <span class="field__hint" id="bypassListHint">逗号分隔；这些主机永不走代理。本地地址与私有网段始终绕过，无需在此列出。</span>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="logLimit">日志保留条数</label>
+            <input type="number" id="logLimit" min="10" max="2000" step="10" aria-describedby="logLimitHint">
+            <span class="field__hint" id="logLimitHint">超出后丢弃最旧的记录。</span>
+          </div>
+        </div>
+        <p class="hint" id="settingsSaved" role="status"></p>
+      </section>
+    </section>
+
+    <!-- ==================== 诊断 ==================== -->
+    <section class="panel" id="panelDiagnostics" aria-labelledby="diagnosticsTitle">
+      <h1 id="diagnosticsTitle" class="panel__title">诊断</h1>
+
+      <section class="card">
+        <div class="card__head"><h2>配置备份</h2></div>
+        <div class="btn-row">
+          <button type="button" class="btn" id="btnExportFile">导出为文件</button>
+          <button type="button" class="btn" id="btnExportClipboard">复制配置</button>
+          <label class="btn" for="importFile">选择文件导入</label>
+          <!-- 用 sr-only 而不是 hidden：hidden 的 input 键盘聚焦不到，
+               只有鼠标点 label 才能触发文件选择框 -->
+          <input type="file" id="importFile" class="sr-only" accept=".json,application/json">
+          <label class="check"><input type="checkbox" id="chkImportMerge"> 合并导入（不勾选则覆盖全部）</label>
+        </div>
+        <div class="field field--stacked">
+          <label class="field__label" for="configText">配置 JSON</label>
+          <textarea id="configText" rows="6" spellcheck="false"
+            placeholder="把导出的 JSON 粘贴到这里，然后点「从文本导入」"></textarea>
+        </div>
+        <div class="btn-row">
+          <button type="button" class="btn btn--primary" id="btnImportText">从文本导入</button>
+        </div>
+        <div class="banner banner--err" id="ioError" hidden></div>
+      </section>
+
+      <section class="card">
+        <div class="card__head"><h2>当前生效的 PAC 脚本</h2></div>
+        <p class="hint">浏览器实际执行的分流脚本。分流结果和预期不符时，先看这里。</p>
+        <details>
+          <summary>展开查看</summary>
+          <div class="btn-row"><button type="button" class="btn btn--sm" id="btnRefreshPac">刷新</button></div>
+          <pre id="pacPreview">点「刷新」加载。</pre>
+        </details>
+      </section>
+    </section>
+
+  </main>
+</div>
+
 <script type="module" src="options.js"></script>
 </body>
 </html>

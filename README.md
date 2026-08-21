@@ -185,7 +185,7 @@ B 图源用另外几个」的场景。绑定的节点全部不可用时会自动
 ## 开发
 
 ```bash
-npm test      # 运行全部 169 个测试（node --test，零依赖）
+npm test      # 运行全部 195 个测试（node --test，零依赖）
 npm run check # 静态校验：manifest 引用、ESM 路径、命名导入、消息契约、架构约束
 npm run icons # 重新生成图标 PNG
 npm run verify # 上面两项一起跑
@@ -201,8 +201,8 @@ src/lib/               纯逻辑，零浏览器依赖，100% 单测覆盖
 src/background/        Service Worker：只做 Chrome API 编排
 src/pages/             设置页与状态弹窗
 tools/                 图标生成、静态校验
-tests/                 node:test 测试（单元 / 集成 / 后台编排 / SW 冒烟）
-docs/                  架构说明与技术限制
+tests/                 node:test 测试（单元 / 集成 / 后台编排 / SW 冒烟 / UI 契约）
+docs/                  架构说明、技术限制、打包发布、人工验收清单
 ```
 
 **架构约束**：`src/lib/` 下不得出现 `chrome.*` —— 这样 PAC 生成、节点解析、规则匹配、
@@ -213,6 +213,9 @@ docs/                  架构说明与技术限制
 用来验证「测速失败 → 自动禁用 → 重新注入的 PAC 不再选中该节点」这类跨模块行为。
 
 细节见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；打包与自动构建见 [docs/PACKAGING.md](docs/PACKAGING.md)。
+
+自动化测试跑不到的部分（真实代理连通性、多个真实出口 IP、代理认证框、控制权争夺等）
+整理成了 [docs/VERIFICATION.md](docs/VERIFICATION.md)，需要在浏览器里人工走一遍。
 
 ---
 

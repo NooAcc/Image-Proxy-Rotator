@@ -3,12 +3,13 @@
  *
  * 打开时拉一次完整状态，之后每 2 秒只拉日志与统计（轻量）。
  * 弹窗关闭即停止轮询 —— 否则会让 Service Worker 一直被唤醒。
+ *
+ * 三个视图（节点/规则/活动）共用同一个滚动容器 #paneBody，切换只是重渲染它。
+ * 这样弹窗高度恒定，不会出现「外层和内层两个滚动条抢滚轮」。
  */
 
-import {
-  send, el, clear, showBanner, fmtTime, fmtLatency,
-  healthLabel, healthDotClass,
-} from '../shared/api.js';
+import { send, el, clear, fmtTime, fmtLatency } from '../shared/api.js';
+import { btn, badge, statusChip, statusLabel, setBanner, announce } from '../shared/ui.js';
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { validateRule } from '../../lib/rule-matcher.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
@@ -16,87 +17,140 @@ import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/consta
 const $ = (id) => document.getElementById(id);
 const REFRESH_MS = 2000;
 
+/** 视图 → 标签按钮 id 与滚动区名称。顺序即分段控件顺序，第一个是默认视图 */
+const VIEWS = [
+  { key: 'nodes', tab: 'tabNodes', label: '节点列表' },
+  { key: 'rules', tab: 'tabRules', label: '生效的规则' },
+  { key: 'logs', tab: 'tabLogs', label: '最近活动' },
+];
+
 let config = null;
 let stats = {};
+let logs = [];
+let view = VIEWS[0].key;
 let timer = null;
+/**
+ * 最近一次拿到的代理控制权状态。
+ * 必须缓存：切换某个节点后也要重画状态行，而那条路径上没有新的 control，
+ * 若按「没传就是没问题」处理，会把「代理设置被其他扩展占用」这条警告悄悄抹掉。
+ */
+let lastControl = null;
+
+// ---------------------------------------------------------------- 视图切换
+
+function setView(key) {
+  view = key;
+  for (const item of VIEWS) {
+    $(item.tab).setAttribute('aria-pressed', String(item.key === key));
+    if (item.key === key) $('paneBody').setAttribute('aria-label', item.label);
+  }
+  // 筛选下拉只在「活动」视图有意义，别的视图下摆着只会误导
+  $('logFilterRow').hidden = key !== 'logs';
+  renderBody();
+}
 
 // ---------------------------------------------------------------- 渲染
 
 function renderStatus(control) {
+  if (control !== undefined) lastControl = control;
+  const effective = lastControl;
   const available = config.nodes.filter(isSelectable).length;
   const activeRules = config.rules.filter((r) => r.enabled && validateRule(r).ok).length;
+  const occupied = Boolean(effective) && !effective.controlled
+    && effective.levelOfControl !== 'unavailable';
 
   let text;
-  let dot;
+  let tone;
   if (!config.enabled) {
     text = '已关闭（全部直连）';
-    dot = 'off';
-  } else if (control && !control.controlled && control.levelOfControl !== 'unavailable') {
+    tone = 'muted';
+  } else if (occupied) {
     text = '代理设置被占用';
-    dot = 'fail';
+    tone = 'err';
   } else if (available === 0) {
     text = '无可用节点';
-    dot = 'fail';
+    tone = 'err';
   } else if (activeRules === 0) {
     text = '无生效规则';
-    dot = 'slow';
+    tone = 'warn';
   } else {
-    text = `已生效（${available} 个节点 / ${activeRules} 条规则）`;
-    dot = 'ok';
+    text = `已生效（${available} 节点 / ${activeRules} 规则）`;
+    tone = 'ok';
   }
 
-  $('statusText').textContent = text;
-  $('statusDot').className = `dot ${dot}`;
+  const chip = $('statusChip');
+  clear(chip);
+  chip.className = `head__status status status--${tone}`;
+  chip.append(
+    el('span', { class: 'status__glyph', 'aria-hidden': 'true', text: tone === 'ok' ? '●' : '○' }),
+    el('span', { text }),
+  );
+
   $('masterSwitch').checked = config.enabled;
 
-  if (control && !control.controlled && control.levelOfControl !== 'unavailable') {
-    showBanner($('controlWarning'),
-      `浏览器代理设置的控制权是「${control.levelOfControl}」，可能被其他代理扩展或系统策略占用，分流可能不生效。`,
-      'warn');
-  } else {
-    showBanner($('controlWarning'), '');
-  }
+  setBanner($('controlWarning'), occupied
+    ? `浏览器代理设置的控制权是「${effective.levelOfControl}」，可能被其他代理扩展或系统策略占用，分流可能不生效。`
+    : '', 'warn');
 
   const unsupported = unsupportedNodes(config.nodes);
-  if (unsupported.length > 0) {
-    const kinds = [...new Set(unsupported.map((n) => protocolLabel(n.protocol)))].join(' / ');
-    showBanner($('unsupportedWarning'),
-      `${unsupported.length} 个节点为 ${kinds} 类型：${UNSUPPORTED_PROTOCOL_MESSAGE}，已停用且不参与分流。`,
-      'err');
-  } else {
-    showBanner($('unsupportedWarning'), '');
-  }
+  const kinds = [...new Set(unsupported.map((n) => protocolLabel(n.protocol)))].join(' / ');
+  setBanner($('unsupportedWarning'), unsupported.length
+    ? `${unsupported.length} 个节点为 ${kinds} 类型：${UNSUPPORTED_PROTOCOL_MESSAGE}，已停用且不参与分流。`
+    : '', 'err');
 }
 
 function renderStats() {
+  const disabled = (stats.manualDisabled ?? 0) + (stats.autoDisabled ?? 0);
+  const latency = Number.isFinite(stats.avgLatency) ? `${stats.avgLatency}` : '–';
+
   $('statTotal').textContent = stats.total ?? 0;
   $('statAvailable').textContent = stats.available ?? 0;
-  $('statDisabled').textContent = (stats.manualDisabled ?? 0) + (stats.autoDisabled ?? 0);
-  $('statAvgLatency').textContent = Number.isFinite(stats.avgLatency) ? `${stats.avgLatency}` : '–';
+  $('statDisabled').textContent = disabled;
+  $('statAvgLatency').textContent = latency;
+
+  // 读屏只念「3」没有意义，必须念一句完整的话
+  announce($('statusSummary'),
+    `共 ${stats.total ?? 0} 个节点，可用 ${stats.available ?? 0} 个，已禁用 ${disabled} 个，`
+    + `平均延迟 ${latency === '–' ? '未知' : `${latency} 毫秒`}。`);
 }
 
-function renderNodes() {
-  const box = $('nodeList');
+/** 三个视图共用一个容器，切换即整块重渲染 */
+function renderBody() {
+  const box = $('paneBody');
   clear(box);
+  if (!config) return;
 
+  if (view === 'nodes') renderNodes(box);
+  else if (view === 'rules') renderRules(box);
+  else renderLogs(box);
+}
+
+function renderNodes(box) {
   if (config.nodes.length === 0) {
-    box.append(el('div', { class: 'empty', text: '还没有节点，点「打开设置」添加 HTTP/HTTPS 代理。' }));
+    box.append(el('p', { class: 'empty', text: '还没有节点。点「设置」添加 HTTP/HTTPS 代理。' }));
     return;
   }
 
   for (const node of config.nodes) {
     const supported = isSupported(node);
+    const usable = supported && node.enabled && !node.autoDisabled;
     const stat = stats.perNode?.[node.id];
-    box.append(el('div', { class: `node-row ${supported && node.enabled && !node.autoDisabled ? '' : 'off'}` },
-      el('span', { class: `dot ${supported ? healthDotClass(node) : 'fail'}` }),
-      el('span', { class: 'name', text: node.name, title: `${protocolLabel(node.protocol)} ${node.host}:${node.port} · ${supported ? healthLabel(node) : UNSUPPORTED_PROTOCOL_MESSAGE}` }),
-      supported ? null : el('span', { class: 'badge err', text: '不支持' }),
-      stat ? el('span', { class: 'used', text: `×${stat.used}` }) : null,
-      el('span', { class: 'latency', text: supported ? fmtLatency(node.health.latencyMs) : '—' }),
+
+    box.append(el('div', { class: `node-row ${usable ? '' : 'is-off'}` },
+      statusChip(node, { compact: true }),
+      el('span', {
+        class: 'node-row__name',
+        text: node.name,
+        title: `${protocolLabel(node.protocol)} ${node.host}:${node.port} · ${statusLabel(node)}`,
+      }),
+      supported ? null : badge('不支持', 'err'),
+      stat ? el('span', { class: 'node-row__used', text: `×${stat.used}` }) : null,
+      el('span', { class: 'node-row__latency', text: supported ? fmtLatency(node.health.latencyMs) : '—' }),
       supported
-        ? el('button', { class: 'btn tiny', text: '测', title: '测试该节点延迟', onclick: () => probeOne(node.id) })
+        ? btn({ text: '测', size: 'sm', title: `测试「${node.name}」的延迟`, onClick: () => probeOne(node.id) })
         : null,
-      el('label', { class: 'switch' },
+      el('label', { class: 'switch switch--sm' },
+        el('span', { class: 'sr-only', text: `启用 ${node.name}` }),
         el('input', {
           type: 'checkbox',
           checked: node.enabled && supported,
@@ -109,38 +163,36 @@ function renderNodes() {
   }
 }
 
-function renderRules() {
-  const box = $('ruleList');
-  clear(box);
+function renderRules(box) {
   const active = config.rules.filter((r) => r.enabled && validateRule(r).ok);
-
   if (active.length === 0) {
-    box.append(el('div', { class: 'empty', text: '没有生效的规则，当前所有请求都直连。' }));
+    box.append(el('p', { class: 'empty', text: '没有生效的规则，当前所有请求都直连。' }));
     return;
   }
 
   for (const rule of active) {
     box.append(el('div', { class: 'rule-row' },
-      el('span', { class: 'badge', text: RULE_TYPE_LABELS[rule.type] ?? rule.type }),
-      el('span', { class: 'pat', text: rule.pattern, title: `${rule.name}\n${rule.pattern}` }),
+      badge(RULE_TYPE_LABELS[rule.type] ?? rule.type),
+      el('span', {
+        class: 'rule-row__pattern',
+        text: rule.pattern,
+        title: `${rule.name}\n${rule.pattern}`,
+      }),
     ));
   }
 }
 
-function renderLogs(logs) {
-  const box = $('logList');
-  clear(box);
-
-  if (!logs || logs.length === 0) {
-    box.append(el('div', { class: 'empty', text: '暂无记录。开启后访问漫画页即可看到分流情况。' }));
+function renderLogs(box) {
+  if (logs.length === 0) {
+    box.append(el('p', { class: 'empty', text: '暂无记录。开启后访问漫画页即可看到分流情况。' }));
     return;
   }
 
   for (const row of logs) {
-    box.append(el('div', { class: `log-row ${row.level}` },
-      el('span', { class: 'at', text: fmtTime(row.at) }),
+    box.append(el('div', { class: `log-row is-${row.level}` },
+      el('span', { class: 'log-row__at', text: fmtTime(row.at) }),
       el('span', {
-        class: 'msg',
+        class: 'log-row__msg',
         text: row.message + (Number.isFinite(row.latencyMs) ? `（${row.latencyMs}ms）` : ''),
       }),
     ));
@@ -158,10 +210,10 @@ function logFilterArgs() {
 
 async function guard(fn) {
   try {
-    showBanner($('errorBanner'), '');
+    setBanner($('errorBanner'), '');
     await fn();
   } catch (e) {
-    showBanner($('errorBanner'), e.message || String(e), 'err');
+    setBanner($('errorBanner'), e.message || String(e), 'err');
   }
 }
 
@@ -169,14 +221,16 @@ async function loadAll() {
   const state = await send('getState');
   config = state.config;
   stats = state.stats;
+  logs = state.logs ?? [];
   renderStatus(state.control);
   renderStats();
-  renderNodes();
-  renderRules();
-  renderLogs(state.logs);
+  renderBody();
 }
 
-/** 轻量刷新：只更新日志与统计，不重建节点/规则列表（避免打断用户操作） */
+/**
+ * 轻量刷新：只拉日志与统计。
+ * 节点/规则视图不重建 —— 用户可能正按着某个开关，重建会打断操作。
+ */
 async function tick() {
   try {
     const res = await send('getLogs', { ...logFilterArgs(), limit: 60 });
@@ -184,7 +238,8 @@ async function tick() {
       stats = res.stats;
       renderStats();
     }
-    renderLogs(res.logs);
+    logs = res.logs ?? [];
+    if (view === 'logs') renderBody();
   } catch {
     // 弹窗轮询失败不值得打扰用户，下一次 tick 会再试
   }
@@ -195,7 +250,7 @@ async function toggleNode(id, enabled) {
     const res = await send('updateNode', { id, patch: { enabled } });
     config = res.config;
     renderStatus();
-    renderNodes();
+    renderBody();
     await tick();
   });
 }
@@ -204,20 +259,24 @@ async function probeOne(id) {
   await guard(async () => {
     const res = await send('probeNode', { id });
     config = res.config;
-    renderNodes();
-    if (!res.result.ok) showBanner($('errorBanner'), `测速失败：${res.result.error}`, 'warn');
+    renderBody();
+    if (!res.result.ok) setBanner($('errorBanner'), `测速失败：${res.result.error}`, 'warn');
     await tick();
   });
 }
 
 // ---------------------------------------------------------------- 事件
 
+for (const item of VIEWS) {
+  $(item.tab).addEventListener('click', () => setView(item.key));
+}
+
 $('masterSwitch').addEventListener('change', async (e) => {
   await guard(async () => {
     const res = await send('setEnabled', { enabled: e.target.checked });
     config = res.config;
     renderStatus(res.control);
-    renderNodes();
+    renderBody();
     await tick();
   });
 });
@@ -227,9 +286,7 @@ $('btnProbeAll').addEventListener('click', async () => {
   button.disabled = true;
   button.textContent = '测速中…';
   await guard(async () => {
-    const res = await send('probeAll');
-    config = res.config;
-    renderNodes();
+    await send('probeAll');
     await loadAll();
   });
   button.disabled = false;
@@ -254,6 +311,7 @@ window.addEventListener('unload', () => clearInterval(timer));
 
 // ---------------------------------------------------------------- 启动
 
+setView(VIEWS[0].key);
 guard(async () => {
   await loadAll();
   timer = setInterval(tick, REFRESH_MS);

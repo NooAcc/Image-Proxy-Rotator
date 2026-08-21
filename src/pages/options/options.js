@@ -4,19 +4,40 @@
  * 单向数据流：所有写操作都发消息给后台，用返回的 config 重渲染整页 ——
  * 页面不维护第二份状态，也就不会出现「界面显示的和实际生效的不一致」。
  *
+ * 分区靠 URL hash 切换（options.html#rules）。这样浏览器前进/后退能用，
+ * 也能把某一屏的链接直接给别人；刷新后还停在原来那一屏。
+ *
  * 本程序只支持 HTTP/HTTPS 代理；不受支持的节点会被显式标注并且永不参与分流。
  */
 
 import {
-  send, el, clear, showBanner, debounce, fmtLatency, fmtAgo,
-  healthLabel, healthDotClass, downloadText, copyText, fileStamp,
+  send, el, clear, debounce, fmtLatency, fmtAgo,
+  downloadText, copyText, fileStamp,
 } from '../shared/api.js';
+import { btn, badge, statusChip, statusLabel, setBanner, announce } from '../shared/ui.js';
 import { matchUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { selectablePool } from '../../lib/scheduler.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
 
 const $ = (id) => document.getElementById(id);
+
+/**
+ * 分区：hash 里的名字 → 对应 section 的 id。
+ *
+ * 两者刻意**不同名**。如果 hash 恰好等于某个元素的 id，浏览器会自作主张把那个
+ * 元素滚进视口 —— 而顶栏和窄屏下的横向导航都是 sticky，滚过去的结果是标题正好
+ * 被压在导航底下，而且这个滚动发生在脚本之后，脚本里 scrollTo(0) 也拦不住。
+ * 让 hash 谁都匹配不上，浏览器就不滚了，滚动完全由本文件说了算。
+ *
+ * 顺序即侧栏顺序；第一个是默认分区。
+ */
+const PANELS = [
+  { hash: 'nodes', panel: 'panelNodes' },
+  { hash: 'rules', panel: 'panelRules' },
+  { hash: 'routing', panel: 'panelRouting' },
+  { hash: 'diagnostics', panel: 'panelDiagnostics' },
+];
 
 /** 当前配置（只作为渲染快照，写操作一律走后台） */
 let config = null;
@@ -25,17 +46,30 @@ let stats = {};
 /** 正在编辑的规则 id；null 表示新建 */
 let editingRuleId = null;
 
+// ---------------------------------------------------------------- 分区导航
+
+function activatePanel(wanted) {
+  const target = PANELS.find((p) => p.hash === wanted) ?? PANELS[0];
+  for (const item of PANELS) $(item.panel).hidden = item !== target;
+  for (const link of document.querySelectorAll('.navitem')) {
+    if (link.getAttribute('href') === `#${target.hash}`) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  }
+  // 换了一屏就该从头看，而不是停在上一屏滚到的位置
+  window.scrollTo({ top: 0 });
+}
+
 // ---------------------------------------------------------------- 渲染
 
 function render() {
-  renderHeader();
+  renderTopbar();
   renderNodes();
   renderRules();
   renderRuleNodeOptions();
   renderSettings();
 }
 
-function renderHeader() {
+function renderTopbar() {
   $('masterSwitch').checked = config.enabled;
   $('masterLabel').textContent = config.enabled ? '已启用' : '已关闭';
 
@@ -43,14 +77,18 @@ function renderHeader() {
   const unsupported = unsupportedNodes(config.nodes).length;
   const activeRules = config.rules.filter((r) => r.enabled && validateRule(r).ok).length;
 
+  $('navCountNodes').textContent = config.nodes.length || '';
+  $('navCountRules').textContent = config.rules.length || '';
+
   const parts = [
-    `${config.nodes.length} 个节点（可用 ${available} 个${unsupported ? `，不支持 ${unsupported} 个` : ''}）`,
-    `${config.rules.length} 条规则（生效 ${activeRules} 条）`,
+    `${config.nodes.length} 个节点（可用 ${available}${unsupported ? `，不支持 ${unsupported}` : ''}）`,
+    `${config.rules.length} 条规则（生效 ${activeRules}）`,
   ];
+  // 「为什么没生效」必须直接写在最显眼处，而不是让用户翻各个分区自己拼线索
   if (!config.enabled) parts.push('总开关关闭，当前全部直连');
   else if (available === 0) parts.push('没有可用节点，当前全部直连');
   else if (activeRules === 0) parts.push('没有生效的规则，当前全部直连');
-  $('summaryText').textContent = parts.join('　·　');
+  announce($('summaryText'), parts.join('　·　'));
 }
 
 function renderNodes() {
@@ -62,11 +100,13 @@ function renderNodes() {
 
   for (const node of config.nodes) {
     const supported = isSupported(node);
+    const usable = supported && node.enabled && !node.autoDisabled;
     const stat = stats.perNode?.[node.id];
 
-    const row = el('tr', { class: supported && node.enabled && !node.autoDisabled ? '' : 'disabled' },
+    body.append(el('tr', { class: usable ? '' : 'is-off' },
       el('td', {},
-        el('label', { class: 'switch' },
+        el('label', { class: 'switch switch--sm' },
+          el('span', { class: 'sr-only', text: `启用节点 ${node.name}` }),
           el('input', {
             type: 'checkbox',
             checked: node.enabled && supported,
@@ -81,40 +121,32 @@ function renderNodes() {
           type: 'text',
           class: 'name-input',
           value: node.name,
+          'aria-label': `节点名称：${node.name}`,
           onchange: (e) => updateNode(node.id, { name: e.target.value }),
         }),
       ),
-      el('td', {},
-        el('span', {
-          class: `badge ${supported ? 'accent' : 'err'}`,
-          text: protocolLabel(node.protocol),
-          title: supported ? '' : UNSUPPORTED_PROTOCOL_MESSAGE,
-        }),
+      el('td', {}, badge(protocolLabel(node.protocol), supported ? 'accent' : 'err')),
+      el('td', { class: 'addr' },
+        `${node.host}:${node.port}`,
+        // 用文字徽标而不是 🔒 —— emoji 在各平台字形差异大，且读屏念法不可控
+        node.username ? badge('认证') : null,
       ),
-      el('td', { class: 'addr', text: `${node.host}:${node.port}${node.username ? ' 🔒' : ''}` }),
-      el('td', { text: supported ? fmtLatency(node.health.latencyMs) : '—' }),
+      el('td', { class: 'latency', text: supported ? fmtLatency(node.health.latencyMs) : '—' }),
       el('td', {},
-        el('span', { class: `dot ${supported ? healthDotClass(node) : 'fail'}` }),
-        ' ',
-        supported ? healthLabel(node) : '不支持',
+        statusChip(node),
         node.health.lastCheckedAt && supported
-          ? el('div', { class: 'hint', style: 'margin:0', text: fmtAgo(node.health.lastCheckedAt) })
+          ? el('p', { class: 'hint', text: fmtAgo(node.health.lastCheckedAt) })
           : null,
       ),
-      el('td', { text: stat ? `${stat.used}` : '0' }),
-      el('td', {},
-        el('div', { class: 'ops' },
-          supported
-            ? el('button', { class: 'btn tiny', text: '测速', onclick: () => probeOne(node.id) })
-            : null,
-          supported && node.autoDisabled
-            ? el('button', { class: 'btn tiny', text: '重置', onclick: () => resetNode(node.id) })
-            : null,
-          el('button', { class: 'btn tiny danger', text: '删除', onclick: () => deleteNode(node.id) }),
-        ),
-      ),
-    );
-    body.append(row);
+      el('td', { class: 'used', text: stat ? `${stat.used}` : '0' }),
+      el('td', {}, el('div', { class: 'cell-ops' },
+        supported ? btn({ text: '测速', size: 'sm', onClick: () => probeOne(node.id) }) : null,
+        supported && node.autoDisabled
+          ? btn({ text: '重置', size: 'sm', title: '清除自动禁用状态', onClick: () => resetNode(node.id) })
+          : null,
+        btn({ text: '删除', size: 'sm', variant: 'danger', onClick: () => deleteNode(node.id) }),
+      )),
+    ));
   }
 
   renderNodeWarnings();
@@ -129,16 +161,17 @@ function renderNodeWarnings() {
   if (unsupported.length > 0) {
     const kinds = [...new Set(unsupported.map((n) => protocolLabel(n.protocol)))].join(' / ');
     box.append(el('div', {
-      class: 'banner err',
-      text: `有 ${unsupported.length} 个节点的类型为 ${kinds}：${UNSUPPORTED_PROTOCOL_MESSAGE}。这些节点已停用且不会参与分流，建议点「清除不支持的节点」删除它们。`,
+      class: 'banner banner--err',
+      text: `有 ${unsupported.length} 个节点的类型为 ${kinds}：${UNSUPPORTED_PROTOCOL_MESSAGE}。`
+        + '这些节点已停用且不会参与分流，建议点「清除不支持的」删除它们。',
     }));
   }
 
-  // 其余逐节点提示（协议不支持的已在上面汇总，这里跳过）
+  // 逐节点提示。协议不支持的已在上面汇总过，这里跳过，避免同一件事说两遍
   for (const node of config.nodes) {
     if (!isSupported(node)) continue;
     for (const message of warnings[node.id] ?? []) {
-      box.append(el('div', { class: 'banner warn', text: `「${node.name}」${message}` }));
+      box.append(el('div', { class: 'banner banner--warn', text: `「${node.name}」${message}` }));
     }
   }
 }
@@ -156,9 +189,10 @@ function renderRules() {
       .map((id) => config.nodes.find((n) => n.id === id)?.name)
       .filter(Boolean);
 
-    body.append(el('tr', { class: rule.enabled && check.ok ? '' : 'disabled' },
+    body.append(el('tr', { class: rule.enabled && check.ok ? '' : 'is-off' },
       el('td', {},
-        el('label', { class: 'switch' },
+        el('label', { class: 'switch switch--sm' },
+          el('span', { class: 'sr-only', text: `启用规则 ${rule.name}` }),
           el('input', {
             type: 'checkbox',
             checked: rule.enabled,
@@ -166,18 +200,27 @@ function renderRules() {
           }),
         ),
       ),
-      el('td', { text: rule.name }),
-      el('td', {}, el('span', { class: 'badge', text: RULE_TYPE_LABELS[rule.type] ?? rule.type })),
-      el('td', { class: 'pattern', text: rule.pattern, title: rule.pattern }),
-      el('td', { text: boundNames.length ? boundNames.join('、') : '全部可用节点' }),
+      el('td', { class: 'truncate', text: rule.name }),
+      el('td', {}, badge(RULE_TYPE_LABELS[rule.type] ?? rule.type)),
+      el('td', { class: 'pattern truncate', text: rule.pattern, title: rule.pattern }),
+      el('td', { class: 'truncate', text: boundNames.length ? boundNames.join('、') : '全部可用节点' }),
       el('td', {},
-        el('div', { class: 'ops' },
-          el('button', { class: 'btn tiny', text: '编辑', onclick: () => startEditRule(rule) }),
-          index > 0 ? el('button', { class: 'btn tiny', text: '↑', title: '上移', onclick: () => moveRule(index, -1) }) : null,
-          index < config.rules.length - 1 ? el('button', { class: 'btn tiny', text: '↓', title: '下移', onclick: () => moveRule(index, 1) }) : null,
-          el('button', { class: 'btn tiny danger', text: '删除', onclick: () => deleteRule(rule.id) }),
+        el('div', { class: 'cell-ops' },
+          btn({ text: '编辑', size: 'sm', onClick: () => startEditRule(rule) }),
+          // 上下箭头始终渲染、到头才禁用 —— 按条件隐藏会让每行按钮数不同，
+          // 「删除」的位置跟着左右跳，很容易点错
+          btn({
+            text: '↑', size: 'sm', title: '上移', disabled: index === 0,
+            onClick: () => moveRule(index, -1),
+          }),
+          btn({
+            text: '↓', size: 'sm', title: '下移', disabled: index === config.rules.length - 1,
+            onClick: () => moveRule(index, 1),
+          }),
+          btn({ text: '删除', size: 'sm', variant: 'danger', onClick: () => deleteRule(rule.id) }),
         ),
-        check.ok ? null : el('div', { class: 'hint', style: 'margin:0;color:var(--err)', text: check.reason }),
+        // 规则非法的原因必须贴在这一行上，而不是丢到页面顶部让用户猜是哪条
+        check.ok ? null : el('p', { class: 'field__error', text: check.reason }),
       ),
     ));
   });
@@ -214,11 +257,12 @@ function renderSettings() {
 
 function renderControlWarning(control) {
   if (!control || control.controlled || control.levelOfControl === 'unavailable') {
-    showBanner($('controlWarning'), '');
+    setBanner($('controlWarning'), '');
     return;
   }
-  showBanner($('controlWarning'),
-    `浏览器代理设置的控制权当前是「${control.levelOfControl}」，可能被其他代理类扩展或系统/企业策略占用，分流可能不生效。请关闭其他代理扩展后重试。`,
+  setBanner($('controlWarning'),
+    `浏览器代理设置的控制权当前是「${control.levelOfControl}」，可能被其他代理类扩展或系统/`
+    + '企业策略占用，分流可能不生效。请关闭其他代理扩展后重试。',
     'warn');
 }
 
@@ -236,10 +280,10 @@ async function refresh(response) {
 /** 统一的错误出口：任何失败都要在界面上说清楚，不允许静默 */
 async function guard(fn, bannerId = 'globalError') {
   try {
-    showBanner($(bannerId), '');
+    setBanner($(bannerId), '');
     await fn();
   } catch (e) {
-    showBanner($(bannerId), e.message || String(e), 'err');
+    setBanner($(bannerId), e.message || String(e), 'err');
   }
 }
 
@@ -258,7 +302,7 @@ async function probeOne(id) {
     const res = await send('probeNode', { id });
     await refresh({ config: res.config });
     if (!res.result.ok) {
-      showBanner($('globalError'), `节点测速失败：${res.result.error}`, 'warn');
+      setBanner($('globalError'), `节点测速失败：${res.result.error}`, 'warn');
     }
   });
 }
@@ -272,6 +316,7 @@ async function saveRule(rule) {
     const res = await send('saveRule', { rule });
     editingRuleId = null;
     $('btnResetRuleForm').hidden = true;
+    $('ruleFormTitle').textContent = '新建规则';
     await refresh({ config: res.config });
   }, 'ruleError');
 }
@@ -295,7 +340,8 @@ function startEditRule(rule) {
   $('rulePattern').value = rule.pattern;
   for (const option of $('ruleNodes').options) option.selected = rule.nodeIds.includes(option.value);
   $('btnResetRuleForm').hidden = false;
-  showBanner($('ruleError'), '');
+  $('ruleFormTitle').textContent = `编辑规则「${rule.name}」`;
+  setBanner($('ruleError'), '');
   $('rulePattern').focus();
 }
 
@@ -305,7 +351,8 @@ function resetRuleForm() {
   $('rulePattern').value = '';
   for (const option of $('ruleNodes').options) option.selected = false;
   $('btnResetRuleForm').hidden = true;
-  showBanner($('ruleError'), '');
+  $('ruleFormTitle').textContent = '新建规则';
+  setBanner($('ruleError'), '');
 }
 
 const saveSettings = debounce(async () => {
@@ -325,11 +372,14 @@ const saveSettings = debounce(async () => {
 
     const res = await send('saveConfig', { config: next });
     await refresh({ config: res.config });
-    $('settingsSaved').textContent = `设置已保存（${new Date().toLocaleTimeString('zh-CN', { hour12: false })}）`;
+    const at = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    announce($('settingsSaved'), `设置已保存（${at}）`);
   });
 }, 400);
 
 // ---------------------------------------------------------------- 事件绑定
+
+window.addEventListener('hashchange', () => activatePanel(location.hash.slice(1)));
 
 $('masterSwitch').addEventListener('change', async (e) => {
   await guard(async () => {
@@ -341,9 +391,9 @@ $('masterSwitch').addEventListener('change', async (e) => {
 
 $('btnAddNodes').addEventListener('click', async () => {
   const text = $('nodeInput').value.trim();
-  showBanner($('importErrors'), '');
+  setBanner($('importErrors'), '');
   if (!text) {
-    showBanner($('importErrors'), '请先粘贴节点链接', 'warn');
+    setBanner($('importErrors'), '请先粘贴节点链接', 'warn');
     return;
   }
   try {
@@ -371,8 +421,7 @@ function reportImport(res, headline = '') {
   }
   if (lines.length === 0) return;
   const level = (res.unsupported?.length || res.errors?.length || headline) ? 'warn' : 'ok';
-  showBanner($('importErrors'), lines.join('\n'), headline ? 'err' : level);
-  $('importErrors').style.whiteSpace = 'pre-wrap';
+  setBanner($('importErrors'), lines.join('\n'), headline ? 'err' : level);
 }
 
 $('btnProbeAll').addEventListener('click', async () => {
@@ -384,7 +433,8 @@ $('btnProbeAll').addEventListener('click', async () => {
     const res = await send('probeAll');
     await refresh({ config: res.config });
     const ok = res.results.filter((r) => r.ok).length;
-    showBanner($('globalError'), `测速完成：${ok}/${res.results.length} 个节点可用`, ok === res.results.length ? 'ok' : 'warn');
+    setBanner($('globalError'), `测速完成：${ok}/${res.results.length} 个节点可用`,
+      ok === res.results.length ? 'ok' : 'warn');
   });
   button.disabled = false;
   button.textContent = original;
@@ -405,7 +455,7 @@ $('btnDeleteUnsupported').addEventListener('click', async () => {
   if (!confirm(`确定删除 ${targets.length} 个不支持的节点？\n\n${UNSUPPORTED_PROTOCOL_MESSAGE}`)) return;
   await guard(async () => {
     const res = await send('deleteUnsupportedNodes');
-    showBanner($('globalError'), `已清除 ${res.removed} 个不支持的节点`, 'ok');
+    setBanner($('globalError'), `已清除 ${res.removed} 个不支持的节点`, 'ok');
     await refresh({ config: res.config });
   });
 });
@@ -413,7 +463,7 @@ $('btnDeleteUnsupported').addEventListener('click', async () => {
 $('btnDeleteDisabled').addEventListener('click', async () => {
   const ids = config.nodes.filter((n) => !n.enabled || n.autoDisabled).map((n) => n.id);
   if (ids.length === 0) {
-    showBanner($('globalError'), '没有已禁用的节点', 'info');
+    setBanner($('globalError'), '没有已禁用的节点', 'info');
     return;
   }
   if (!confirm(`确定删除 ${ids.length} 个已禁用的节点？`)) return;
@@ -431,7 +481,7 @@ $('btnSaveRule').addEventListener('click', async () => {
   };
   const check = validateRule(createRule(rule));
   if (!check.ok) {
-    showBanner($('ruleError'), check.reason, 'err');
+    setBanner($('ruleError'), check.reason, 'err');
     return;
   }
   await saveRule(rule);
@@ -452,7 +502,7 @@ $('btnAddPresets').addEventListener('click', async () => {
       await send('saveRule', { rule: { ...preset, enabled: false, nodeIds: [] } });
     }
     await refresh();
-    showBanner($('ruleError'), '已插入 3 条预设规则（默认关闭，请确认后逐条启用）', 'ok');
+    setBanner($('ruleError'), '已插入 3 条预设规则（默认关闭，请确认后逐条启用）', 'ok');
   }, 'ruleError');
 });
 
@@ -460,24 +510,25 @@ $('btnTestRule').addEventListener('click', () => {
   const url = $('ruleTester').value.trim();
   const box = $('ruleTestResult');
   if (!url) {
-    showBanner(box, '请输入一个 URL', 'warn');
+    setBanner(box, '请输入一个 URL', 'warn');
     return;
   }
 
   const rule = matchUrl(url, config.rules);
   if (!rule) {
-    showBanner(box, '未命中任何启用的规则 → 该请求会直连，不走代理。', 'info');
+    setBanner(box, '未命中任何启用的规则 → 该请求会直连，不走代理。', 'info');
     return;
   }
 
   const pool = selectablePool(config.nodes, compileRule(rule).nodeIds);
   if (pool.length === 0) {
-    showBanner(box, `命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}），但当前没有可用的 HTTP/HTTPS 节点 → 会按兜底策略处理。`, 'warn');
+    setBanner(box, `命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}），`
+      + '但当前没有可用的 HTTP/HTTPS 节点 → 会按兜底策略处理。', 'warn');
     return;
   }
-  showBanner(box,
+  setBanner(box,
     `命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}）→ 将在这 ${pool.length} 个节点间轮询：`
-    + pool.map((n) => `${n.name}（${protocolLabel(n.protocol)}）`).join('、'),
+    + pool.map((n) => `${n.name}（${protocolLabel(n.protocol)}·${statusLabel(n)}）`).join('、'),
     'ok');
 });
 
@@ -498,20 +549,22 @@ $('btnExportClipboard').addEventListener('click', async () => {
     const res = await send('exportConfig');
     $('configText').value = res.text;
     const ok = await copyText(res.text);
-    showBanner($('ioError'), ok ? '配置已复制到剪贴板，同时填入下方文本框。' : '剪贴板不可用，配置已填入下方文本框。', 'ok');
+    setBanner($('ioError'),
+      ok ? '配置已复制到剪贴板，同时填入下方文本框。' : '剪贴板不可用，配置已填入下方文本框。',
+      'ok');
   }, 'ioError');
 });
 
 $('btnImportText').addEventListener('click', async () => {
   const text = $('configText').value.trim();
   if (!text) {
-    showBanner($('ioError'), '请先把配置 JSON 粘贴到下方文本框', 'warn');
+    setBanner($('ioError'), '请先把配置 JSON 粘贴到上方文本框', 'warn');
     return;
   }
   await guard(async () => {
     const res = await send('importConfig', { text, merge: $('chkImportMerge').checked });
     await refresh({ config: res.config });
-    showBanner($('ioError'), '配置已导入。', 'ok');
+    setBanner($('ioError'), '配置已导入。', 'ok');
   }, 'ioError');
 });
 
@@ -523,7 +576,7 @@ $('importFile').addEventListener('change', async (e) => {
     $('configText').value = text;
     const res = await send('importConfig', { text, merge: $('chkImportMerge').checked });
     await refresh({ config: res.config });
-    showBanner($('ioError'), `已从 ${file.name} 导入配置。`, 'ok');
+    setBanner($('ioError'), `已从 ${file.name} 导入配置。`, 'ok');
   }, 'ioError');
   e.target.value = '';
 });
@@ -537,6 +590,7 @@ $('btnRefreshPac').addEventListener('click', async () => {
 
 // ---------------------------------------------------------------- 启动
 
+activatePanel(location.hash.slice(1));
 guard(async () => {
   await refresh();
 });

@@ -2,7 +2,7 @@
  * 全局常量与默认配置。
  *
  * 本文件（以及 src/lib/ 下所有文件）不得引用 `chrome.*`，
- * 以保证纯逻辑层可以在 Node 下直接单元测试（见 plan.md 决策 D6）。
+ * 以保证纯逻辑层可以在 Node 下直接单元测试（见 docs/ARCHITECTURE.md 决策 D6）。
  */
 
 /** chrome.storage.local 中存放配置的键名 */

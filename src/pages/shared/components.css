@@ -1,0 +1,524 @@
+/**
+ * 组件层：两个页面共用的基础排版与控件。
+ *
+ * 规矩：本文件与页面样式**只准引用 tokens.css 的 var()**，不出现字面量颜色或
+ * 字面量间距。tests/ui-tokens.test.js 会检查 var() 引用是否都有定义。
+ */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/*
+ * hidden 属性必须永远赢。
+ *
+ * 浏览器默认样式表里 [hidden] { display: none } 的优先级低于任何类选择器，所以
+ * .btn { display: inline-flex } 会把 button.hidden = true 悄悄失效 —— 按钮该藏
+ * 的时候照样显示，而且没有任何报错。JS 里用 .hidden 控制显隐的地方很多
+ * （#btnResetRuleForm、#logFilterRow、.panel、各条 banner），逐个补 [hidden]
+ * 规则是打地鼠，所以在这里一次性钉死。
+ */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading);
+}
+
+h1, h2, h3 {
+  margin: 0;
+  font-weight: 600;
+}
+
+h1 { font-size: var(--text-lg); }
+h2 { font-size: var(--text-md); }
+
+h3 {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  font-weight: 600;
+}
+
+p { margin: 0; }
+
+a { color: var(--accent); }
+
+code, .mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* 数字要能上下对齐才好比对延迟与计数 */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.hint {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* 只给读屏的文字。不能用 display:none —— 那样读屏也读不到 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 焦点环统一在这里给。任何地方都不准 outline: none 而不给替代物 */
+:where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------- 卡片 */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--card-pad);
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  margin-bottom: var(--gap);
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+
+.btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--control-h);
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--fg);
+  font: inherit;
+  font-size: var(--text-md);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+
+.btn--danger {
+  color: var(--err);
+  border-color: var(--err);
+  background: transparent;
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+.btn--sm {
+  min-height: 22px;
+  padding: 0 7px;
+  font-size: var(--text-sm);
+}
+
+.btn-row {
+  display: flex;
+  gap: var(--gap);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ---------------------------------------------------------------- 表单控件 */
+
+input[type="text"],
+input[type="number"],
+input[type="password"],
+select,
+textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-h);
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  font: inherit;
+  font-size: var(--text-md);
+}
+
+input[type="number"] {
+  font-variant-numeric: tabular-nums;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 88px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+select[multiple] {
+  /* 高度交给 size 属性：写死 min-height 会切出半行选项，看着像渲染坏了 */
+  padding: 4px;
+}
+
+/* ---------------------------------------------------------------- 字段布局 */
+
+/*
+ * 这一段是「绕过列表（逗号分隔，这些主机永不走代理）」折行问题的根治处。
+ *
+ * 旧布局是 grid-template-columns: repeat(auto-fit, minmax(190px, 1fr))，标签块级
+ * 排在控件上方 —— 列宽只有 190~250px，任何超过十来个汉字的标签都必然折成两行，
+ * 于是那一格的输入框比同排其他格低一行，看起来就「和旁边不一样」。
+ *
+ * 新布局把标签移到控件左侧的**定宽列**里：列宽固定 var(--label-w)，与内容无关，
+ * 所有行的标签左对齐、控件左对齐。标签保持简短（补充说明移到控件下方的 hint，
+ * 那里有整行宽度），因此永远不会被挤到需要折行。
+ */
+
+.field-grid {
+  display: grid;
+  gap: var(--gap);
+}
+
+.field--inline {
+  display: grid;
+  grid-template-columns: var(--label-w) minmax(0, 1fr);
+  align-items: center;
+  column-gap: var(--gap-lg);
+  row-gap: 2px;
+}
+
+.field--inline > .field__label {
+  grid-column: 1;
+  justify-self: start;
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.field--inline > :where(input, select, textarea),
+.field--inline > .field__hint {
+  grid-column: 2;
+}
+
+/* 数字铺满整行会让「1」这种值显得莫名，收窄并靠左 */
+.field--inline > input[type="number"] {
+  width: var(--field-num-w);
+  justify-self: start;
+}
+
+/* 标签在上、控件在下。给 textarea、多选列表这类天生要占满整行的控件用 */
+.field--stacked {
+  display: block;
+}
+
+/* 与 inline 变体同一套字号与色值 —— 同一张表单里两种标签样式会显得没打理过 */
+.field--stacked > .field__label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--fg);
+  font-size: var(--text-md);
+}
+
+.field__hint {
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+}
+
+.field__error {
+  color: var(--err);
+  font-size: var(--text-xs);
+}
+
+/* 复选框那一行：方框与文字同基线，整块可点 */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+.check > input {
+  width: auto;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- 开关 */
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap);
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch > input {
+  appearance: none;
+  flex: none;
+  width: 36px;
+  height: 20px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.switch > input::after {
+  content: "";
+  position: absolute;
+  inset-block-start: 3px;
+  inset-inline-start: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--fg-muted);
+  transition: transform var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.switch > input:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.switch > input:checked::after {
+  background: var(--accent-fg);
+  transform: translateX(16px);
+}
+
+.switch > input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.switch--sm > input {
+  width: 30px;
+  height: 17px;
+}
+
+.switch--sm > input::after {
+  width: 10px;
+  height: 10px;
+  inset-block-start: 3px;
+}
+
+.switch--sm > input:checked::after {
+  transform: translateX(13px);
+}
+
+/* ---------------------------------------------------------------- 徽标 */
+
+.badge {
+  display: inline-block;
+  flex: none;
+  padding: 0 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
+  line-height: 17px;
+  /* 徽标一折行整个表格行高就跳，所以它永不换行 */
+  white-space: nowrap;
+}
+
+.badge--accent { color: var(--accent); border-color: currentColor; }
+.badge--ok { color: var(--ok); border-color: currentColor; }
+.badge--warn { color: var(--warn); border-color: currentColor; }
+.badge--err { color: var(--err); border-color: currentColor; }
+
+/* ---------------------------------------------------------------- 状态指示器 */
+
+/*
+ * 颜色 + 字形 + 文字三重编码。色觉障碍或灰度显示下，后两者仍然能区分状态。
+ * 详见 shared/ui.js 的 NODE_STATUS 与 tests/ui-status.test.js。
+ */
+.status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.status__glyph {
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+.status__label {
+  font-size: var(--text-sm);
+}
+
+.status--ok { color: var(--ok); }
+.status--warn { color: var(--warn); }
+.status--err { color: var(--err); }
+.status--muted { color: var(--fg-muted); }
+
+/* ---------------------------------------------------------------- 表格 */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-md);
+}
+
+th, td {
+  text-align: left;
+  padding: 0 var(--gap);
+  height: var(--row-h);
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+thead th {
+  /*
+   * 这里刻意不用 position: sticky。.table-wrap 的 overflow-x: auto 会让 overflow-y
+   * 也变成滚动容器，而它没有高度上限、永远不在纵向滚动 —— 粘性表头在这种容器里
+   * 是永远不会触发的死代码。想让表头跟随，得先给 .table-wrap 限高，那又会引入
+   * 页面滚动 + 表格滚动的嵌套滚动，正是弹窗那边刚拆掉的毛病。
+   */
+  height: 30px;
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+tbody tr:last-child > td {
+  border-bottom: none;
+}
+
+tbody tr:hover {
+  background: var(--surface-2);
+}
+
+/* 停用的行压低但不压到读不清 —— 0.5 的透明度会让文字掉到 4.5:1 以下 */
+tr.is-off > td {
+  color: var(--fg-muted);
+}
+
+.cell-ops {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------- 提示条 */
+
+.banner {
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: var(--text-md);
+  /* 导入报错是逐条多行的，换行交给 CSS，JS 不必改样式 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.banner--err { color: var(--err); border-color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+.banner--warn { color: var(--warn); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.banner--ok { color: var(--ok); border-color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+.banner--info { color: var(--fg-muted); border-color: var(--border); background: var(--surface-2); }
+
+.empty {
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  padding: var(--gap-lg) var(--gap);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- 折叠面板 */
+
+details {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--gap);
+  background: var(--surface-2);
+}
+
+summary {
+  cursor: pointer;
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+pre {
+  margin: var(--gap) 0 0;
+  padding: var(--gap);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: auto;
+  max-height: 320px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+
+

@@ -206,8 +206,10 @@ for (const path of [
   'src/pages/popup/popup.html',
   'src/pages/popup/popup.css',
   'src/pages/popup/popup.js',
-  'src/pages/shared/theme.css',
+  'src/pages/shared/tokens.css',
+  'src/pages/shared/components.css',
   'src/pages/shared/api.js',
+  'src/pages/shared/ui.js',
 ]) {
   mustExist(path, '页面文件');
 }

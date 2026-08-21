@@ -1,66 +1,171 @@
-/* 设置页专属布局 */
+/**
+ * 设置页布局：常驻顶栏 + 左侧分区导航 + 单栏内容区。
+ *
+ * 只放布局。颜色、间距、控件外观都在 shared/tokens.css 与 shared/components.css 里。
+ */
 
-.page {
-  max-width: 1080px;
-  margin: 0 auto;
-  padding: 20px 16px 48px;
-}
+/* ---------------------------------------------------------------- 顶栏 */
 
-.mt {
-  margin-top: 14px;
-}
-
-#nodeInput,
-#configText {
-  font-family: "Cascadia Code", "Consolas", "SF Mono", ui-monospace, monospace;
-  font-size: 12.5px;
-}
-
-#nodeTable td:first-child,
-#ruleTable td:first-child {
-  width: 48px;
-}
-
-#nodeTable .name-input {
-  min-width: 110px;
-  border-color: transparent;
-  background: transparent;
-  padding: 3px 5px;
-}
-
-#nodeTable .name-input:hover {
-  border-color: var(--border);
-}
-
-#nodeTable .addr {
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-size: 12px;
-  color: var(--fg-muted);
-}
-
-#nodeTable .ops,
-#ruleTable .ops {
+.topbar {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 3;
   display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--gap-lg);
+  height: var(--header-h);
+  padding: 0 var(--gap-lg);
+  background: var(--surface);
+  border-block-end: 1px solid var(--border);
 }
 
-#ruleTable .pattern {
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-size: 12px;
-  max-width: 340px;
+.topbar__brand {
+  flex: none;
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+/* 摘要文字可能很长，压缩它而不是把总开关挤出屏幕 */
+.topbar__summary {
+  flex: 1;
+  min-width: 0;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-#nodeWarnings .banner {
-  margin-top: 10px;
-  margin-bottom: 0;
+.topbar__switch {
+  flex: none;
+  font-size: var(--text-md);
 }
 
-#ruleNodes {
-  min-height: 84px;
+/* ---------------------------------------------------------------- 全局告警 */
+
+/* 两条 banner 都隐藏时不留空白 —— 否则顶栏下方永远挂着一段空隙 */
+.alerts:has(> .banner:not([hidden])) {
+  display: grid;
+  gap: var(--gap);
+  padding: var(--gap) var(--gap-lg) 0;
+}
+
+/* ---------------------------------------------------------------- 骨架 */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  align-items: start;
+}
+
+.sidenav {
+  position: sticky;
+  inset-block-start: var(--header-h);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--gap-lg) var(--gap);
+}
+
+.navitem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap);
+  padding: 0 10px;
+  height: var(--row-h);
+  border-radius: var(--radius-sm);
+  color: var(--fg-muted);
+  font-size: var(--text-md);
+  text-decoration: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.navitem:hover {
+  background: var(--surface-2);
+  color: var(--fg);
+}
+
+.navitem[aria-current="page"] {
+  background: var(--surface);
+  border-inline-start: 2px solid var(--accent);
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.navitem__count {
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+.content {
+  min-width: 0;
+  max-width: 960px;
+  padding: var(--gap-lg) var(--gap-lg) 48px;
+}
+
+.panel {
+  display: grid;
+  gap: var(--gap-lg);
+}
+
+/* 列表为空时整块（含边框）都收掉，不留一个空框 */
+.table-wrap:has(> table[hidden]) {
+  display: none;
+}
+
+.panel__title {
+  font-size: var(--text-lg);
+}
+
+/* 纵向堆叠容器，用于成组的复选框与警示条 */
+.stack {
+  display: grid;
+  gap: var(--gap);
+}
+
+.stack:empty {
+  display: none;
+}
+
+/* ---------------------------------------------------------------- 表格单元 */
+
+/* 名称可以直接在表格里改，所以做成「看着像文字、点进去是输入框」 */
+#nodeTable .name-input {
+  min-width: 120px;
+  min-height: 24px;
+  border-color: transparent;
+  background: transparent;
+  padding: 2px 5px;
+}
+
+#nodeTable .name-input:hover {
+  border-color: var(--border-strong);
+}
+
+/* input 不会继承 td 的颜色，停用行的名称得单独压灰 */
+#nodeTable tr.is-off .name-input {
+  color: var(--fg-muted);
+}
+
+#nodeTable .addr {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  white-space: nowrap;
+}
+
+#nodeTable .latency,
+#nodeTable .used {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+#ruleTable .pattern {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  max-width: 320px;
 }
 
 #ruleTester {
@@ -68,13 +173,43 @@
   min-width: 240px;
 }
 
-@media (max-width: 720px) {
-  .page {
-    padding: 14px 10px 40px;
+/* ---------------------------------------------------------------- 窄屏 */
+
+@media (max-width: 860px) {
+  /* 侧栏改成顶部一条横向导航，内容区拿回整个宽度 */
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .card {
-    padding: 13px;
+  /* 侧栏改成顶部一条横向导航，内容区拿回整个宽度。
+     仍然保持 sticky —— 否则深链滚动后导航就滑出屏幕，切分区还得先滚回去 */
+  .sidenav {
+    flex-direction: row;
+    overflow-x: auto;
+    z-index: 2;
+    padding: var(--gap) var(--gap);
+    background: var(--bg);
+    border-block-end: 1px solid var(--border);
+  }
+
+  .navitem[aria-current="page"] {
+    border-inline-start: none;
+    border-block-end: 2px solid var(--accent);
+  }
+
+  .content {
+    padding: var(--gap-lg) var(--gap) 40px;
+  }
+
+  /* 标签列在窄屏里挤不下，回退成标签在上、控件在下 */
+  .field--inline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .field--inline > .field__label,
+  .field--inline > :where(input, select, textarea),
+  .field--inline > .field__hint {
+    grid-column: 1;
   }
 
   #ruleTable .pattern {

@@ -1,0 +1,110 @@
+/**
+ * 设计令牌：颜色、排版、密度、圆角、动效时长。
+ *
+ * 这里是**唯一**的视觉真相来源 —— components.css 与两个页面的样式只准引用
+ * var(--x)，不准出现字面量颜色或字面量间距。
+ *
+ * 主题策略：深色是基准（写在 :root 里），亮色在 media query 中覆盖差异项。
+ * 开发工具类产品的用户多半整天待在深色环境里，把深色当默认比反过来更贴合；
+ * 没有系统偏好时也就落到深色。
+ *
+ * 亮色**不是**深色的机械反转。深色调里 --accent 用的亮绿 #22C55E 放到白底上
+ * 当文字只有约 1.9:1，远低于 4.5:1；--err 的亮红同理。所以亮色另配了一组压暗的
+ * 绿/琥珀/红，只在「实心填充按钮」这种场景才让高饱和色回到背景位。
+ * 两套主题的对比度由 tests/ui-tokens.test.js 逐对断言，改色值会被测试拦下。
+ */
+
+:root {
+  color-scheme: dark light;
+
+  /* ---------- 颜色：深色基准 ---------- */
+  --bg: #0F172A;
+  --surface: #1B2336;
+  --surface-2: #272F42;
+
+  /* --border 只用于装饰性分隔线；凡是要让用户看清「控件到哪儿为止」的边框
+     必须用 --border-strong —— 后者对 surface 有 3:1，前者没有（WCAG 1.4.11）。 */
+  --border: #475569;
+  --border-strong: #64748B;
+
+  --fg: #F8FAFC;
+  --fg-muted: #94A3B8;
+
+  --accent: #22C55E;
+  --accent-fg: #0F172A;
+
+  --ok: #22C55E;
+  --warn: #E0A03A;
+  --err: #F87171;
+
+  --ring: #F8FAFC;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.32), 0 4px 12px rgb(0 0 0 / 0.24);
+
+  /* ---------- 排版 ---------- */
+  /* 系统字体栈：扩展页面加载 Web 字体会闪一下白，而且离线时拿不到。
+     中文字形交给系统，Windows/macOS/Linux 各自命中本地最优解。 */
+  --font-sans: "Segoe UI", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+    system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", "SF Mono", ui-monospace, monospace;
+
+  --text-lg: 15px;
+  --text-md: 13px;
+  --text-sm: 12px;
+  --text-xs: 11px;
+  --leading: 1.5;
+
+  /* ---------- 密度：data-dense dashboard 档 ---------- */
+  --row-h: 36px;
+  --control-h: 28px;
+  --card-pad: 12px;
+  --gap: 8px;
+  --gap-lg: 16px;
+  --header-h: 56px;
+  --sidebar-w: 240px;
+  /* 分流页表单的标签列宽。长标签在这一列里横向铺开，不折行 —— 这正是
+     「绕过列表（逗号分隔，这些主机永不走代理）」换行问题的结构性修复。 */
+  --label-w: 168px;
+  /* 数字输入的宽度。铺满整行会让「1」「200」这种值显得莫名其妙 */
+  --field-num-w: 132px;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+
+  /* ---------- 动效 ---------- */
+  --dur: 160ms;
+  --ease: cubic-bezier(0.2, 0, 0.3, 1);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #F1F5F9;
+    --surface: #FFFFFF;
+    --surface-2: #E8EDF3;
+
+    --border: #CBD5E1;
+    --border-strong: #64748B;
+
+    --fg: #0F172A;
+    --fg-muted: #51607A;
+
+    /* 压暗到能当正文色：#15803D 对白底 5.02:1，亮绿 #22C55E 只有 1.9:1 */
+    --accent: #15803D;
+    --accent-fg: #FFFFFF;
+
+    --ok: #15803D;
+    --warn: #B45309;
+    --err: #B91C1C;
+
+    --ring: #0F172A;
+
+    --shadow: 0 1px 2px rgb(15 23 42 / 0.07), 0 4px 12px rgb(15 23 42 / 0.05);
+  }
+}
+
+/* 用户要求减少动效时，把时长归零而不是留一半 —— 半速动画仍会引发不适 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur: 0ms;
+  }
+}
