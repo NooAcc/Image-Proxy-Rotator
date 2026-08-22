@@ -208,6 +208,7 @@
 
   .field--inline > .field__label,
   .field--inline > :where(input, select, textarea),
+  .field--inline > .field__control,
   .field--inline > .field__hint {
     grid-column: 1;
   }

@@ -58,26 +58,33 @@
 
       <section class="card">
         <div class="card__head"><h2>请求统计</h2></div>
-        <p class="hint">
-          只统计<strong>命中了你的规则</strong>的请求；其余请求本就该直连，不计入。
-          成功的判定是 HTTP 状态码小于 400。
-        </p>
-        <p class="hint">
-          <strong>「命中但直连」不为零时先查这一项。</strong>HTTPS 请求交给分流脚本时，
-          浏览器只给出「协议 + 域名 + 端口」，路径与查询串会被剥掉。所以依赖扩展名或路径的
-          规则（例如 <code>\.jpg$</code>）对 HTTPS 图片永远命中不了 —— 不报错，只是安静地直连。
-          把这类规则改成「域名」类型即可。
-        </p>
+        <!--
+          「HTTPS 的路径会被剥掉」这件事**只**写在 renderRequestKpis 的条件 banner 里。
+          那是诊断，不是参考：命中但直连为 0 时它一个字都不该出现；不为 0 时它要带上
+          具体条数，直接说该改什么。这里只放「这些数字是怎么数出来的」。
+        -->
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>这些数字怎么数出来的</summary>
+          <div class="card__help__body">
+            <p>只统计<strong>命中了你的规则</strong>的请求；其余请求本就该直连，不计入。</p>
+            <p>成功的判定是 HTTP 状态码小于 400。「平均耗时」只算真的测到耗时的那部分请求。</p>
+            <p>「对端确认是代理」看的是响应从哪个地址回来的 —— 落在你某个节点上，就是走通了代理的硬证据。</p>
+          </div>
+        </details>
+        <div class="banner banner--err" id="blindWarning" hidden></div>
         <dl class="kpis" id="requestKpis"></dl>
       </section>
 
       <section class="card">
         <div class="card__head"><h2>节点使用分布</h2></div>
-        <p class="hint">
-          归因靠请求的对端 IP —— 走代理时对端就是代理本身。<strong>只有 IP，没有端口</strong>，
-          所以多个节点共用同一个地址（只有端口不同）时无法区分，这些请求计入「无法归因」，
-          不会硬塞给某个节点。节点写成域名时要先测速一次才认得出。
-        </p>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>这张表为什么可能认不出节点</summary>
+          <div class="card__help__body">
+            <p>归因靠请求的对端 IP —— 走代理时对端就是代理本身。<strong>只有 IP，没有端口</strong>，
+              所以多个节点共用同一个地址（只有端口不同）时无法区分。</p>
+            <p>这类请求计入「无法归因」，不会硬塞给某个节点。节点写成域名时要先测速一次才认得出。</p>
+          </div>
+        </details>
         <div class="banner banner--warn" id="nodeUsageShared" hidden></div>
         <div class="table-wrap">
           <table id="nodeUsageTable">
@@ -99,10 +106,8 @@
 
       <section class="card">
         <div class="card__head"><h2>规则命中</h2></div>
-        <p class="hint">
-          命中 0 次的规则要么写错了、要么根本没有匹配的请求 —— 两种都值得查一下。
-          可以在「规则」分区用规则测试器验证。
-        </p>
+        <!-- 「有规则一次都没命中」是条件才成立的诊断，交给 renderRuleHits 按实际条数渲染 -->
+        <div class="banner banner--warn" id="coldRuleNote" hidden></div>
         <div class="table-wrap">
           <table id="ruleHitTable">
             <thead>
@@ -128,17 +133,23 @@
 
       <section class="card">
         <div class="card__head"><h2>批量导入</h2></div>
-        <p class="hint">
-          仅支持 <strong>HTTP / HTTPS 代理</strong>。每行一个：<code>http://主机:端口</code>、
-          <code>http://用户名:密码@主机:端口</code>，或 <code>主机:端口</code>（按 HTTP 处理）。
-          也可直接粘贴 base64 订阅内容；行尾 <code>#名称</code> 用于命名，<code>#</code> 开头的行是注释。
-        </p>
-        <p class="hint">
-          SOCKS4 / SOCKS5 / VLESS / VMess / Hysteria2 / Trojan / Shadowsocks
-          <strong>不受支持</strong>，粘贴后会被逐条列出并忽略。
-        </p>
+        <!--
+          「不支持哪些协议」不预先警告：粘贴之后 reportImport() 会把每一条逐行列出来，
+          节点列表上方还有一条汇总 banner。在用户还没粘贴任何东西时就摆一段协议黑名单，
+          是拿一屏文字去防一件报错路径已经说清楚了的事。
+        -->
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>支持哪些格式</summary>
+          <div class="card__help__body">
+            <p>每行一个。<code>http://主机:端口</code>、<code>http://用户名:密码@主机:端口</code>，
+              或 <code>主机:端口</code>（按 HTTP 处理）。也可直接粘贴 base64 订阅内容。</p>
+            <p>行尾 <code>#名称</code> 用于命名，<code>#</code> 开头的行是注释。</p>
+            <p>SOCKS4 / SOCKS5 / VLESS / VMess / Hysteria2 / Trojan / Shadowsocks
+              <strong>不受支持</strong>，粘贴后会被逐条列出并忽略。</p>
+          </div>
+        </details>
         <div class="field field--stacked">
-          <label class="field__label" for="nodeInput">节点链接</label>
+          <label class="field__label" for="nodeInput">节点链接（仅 HTTP / HTTPS 代理）</label>
           <textarea id="nodeInput" rows="5" spellcheck="false"
             placeholder="http://1.2.3.4:8080#节点A&#10;https://proxy.example.com:8443#节点B&#10;http://user:pass@5.6.7.8:3128#节点C&#10;10.0.0.5:3128"></textarea>
         </div>
@@ -195,8 +206,7 @@
         <div class="field-grid">
           <div class="field field--inline">
             <label class="field__label" for="ruleName">名称</label>
-            <input type="text" id="ruleName" placeholder="例如：漫画图床" aria-describedby="ruleNameHint">
-            <span class="field__hint" id="ruleNameHint">可留空，留空时自动用规则内容当名字。</span>
+            <input type="text" id="ruleName" placeholder="留空则自动用规则内容当名字">
           </div>
           <div class="field field--inline">
             <label class="field__label" for="ruleType">类型</label>
@@ -248,10 +258,10 @@
 
       <section class="card">
         <div class="card__head"><h2>规则测试器</h2></div>
-        <p class="hint">输入一个图片 URL，看它会不会走代理、命中哪条规则。</p>
         <div class="btn-row">
           <label class="sr-only" for="ruleTester">要测试的 URL</label>
-          <input type="text" id="ruleTester" spellcheck="false" placeholder="https://cdn.manga.com/img/001.jpg">
+          <input type="text" id="ruleTester" spellcheck="false"
+            placeholder="填一个图片 URL，看它走不走代理、命中哪条规则">
           <button type="button" class="btn" id="btnTestRule">测试</button>
         </div>
         <div class="banner banner--info" id="ruleTestResult" hidden></div>
@@ -261,9 +271,14 @@
     <!-- ==================== 分流 ==================== -->
     <!--
       这一屏的每个字段都用 .field--inline：标签在左侧定宽列（--label-w），控件在右。
-      长说明一律放到控件下方的 .field__hint —— 那里有整行宽度，标签就永远不会
-      被挤到折行。旧版把「绕过列表（逗号分隔，这些主机永不走代理）」整句塞进
-      190px 宽的自适应列标签里，必然折成两行，那格输入框也就比同排其他格矮一行。
+      旧版把「绕过列表（逗号分隔，这些主机永不走代理）」整句塞进 190px 宽的自适应列
+      标签里，必然折成两行，那格输入框也就比同排其他格矮一行。
+
+      说明文字的去处按用途分三条路，而不是一律挂 .field__hint：
+        · 纯单位（毫秒、分钟、次）→ .field__unit，贴在输入框右侧，不占行
+        · 标签能自己说清的       → 改标签，说明整条删掉
+        · 剩下的语义约束         → .card__help 折叠区
+      八条 .field__hint 就是这么从常驻的八行压到零行的。
     -->
     <section class="panel" id="panelRouting" aria-labelledby="routingTitle">
       <h1 id="routingTitle" class="panel__title">分流</h1>
@@ -286,35 +301,50 @@
             </select>
           </div>
           <div class="field field--inline">
-            <label class="field__label" for="rotateEvery">换节点频率</label>
-            <input type="number" id="rotateEvery" min="1" max="1000" aria-describedby="rotateEveryHint">
-            <span class="field__hint" id="rotateEveryHint">每几个请求换一次节点。填 1 表示每个请求都换。</span>
+            <label class="field__label" for="rotateEvery">每几个请求换节点</label>
+            <div class="field__control">
+              <input type="number" id="rotateEvery" min="1" max="1000">
+              <span class="field__unit">个（1 = 每个请求都换）</span>
+            </div>
           </div>
         </div>
       </section>
 
       <section class="card">
         <div class="card__head"><h2>测速与健康检查</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>测速地址该填什么</summary>
+          <div class="card__help__body">
+            <p>应当是一个<strong>返回极小响应且允许跨域</strong>的端点，例如只回 204 的探测地址。
+              下载一张大图当测速目标，量到的是带宽而不是延迟。</p>
+            <p>测速请求会被强制路由到被测节点，所以一次测速就等价于验证了这条节点的 CONNECT 通路。</p>
+          </div>
+        </details>
         <div class="field-grid">
           <div class="field field--inline">
             <label class="field__label" for="probeUrl">测速地址</label>
-            <input type="text" id="probeUrl" spellcheck="false" aria-describedby="probeUrlHint">
-            <span class="field__hint" id="probeUrlHint">应当返回极小响应且允许跨域，例如返回 204 的探测端点。</span>
+            <input type="text" id="probeUrl" spellcheck="false">
           </div>
           <div class="field field--inline">
             <label class="field__label" for="probeTimeout">单次超时</label>
-            <input type="number" id="probeTimeout" min="500" max="60000" step="500" aria-describedby="probeTimeoutHint">
-            <span class="field__hint" id="probeTimeoutHint">单位毫秒。超过这个时间未响应即判定失败。</span>
+            <div class="field__control">
+              <input type="number" id="probeTimeout" min="500" max="60000" step="500">
+              <span class="field__unit">毫秒</span>
+            </div>
           </div>
           <div class="field field--inline">
             <label class="field__label" for="probeInterval">定时测速间隔</label>
-            <input type="number" id="probeInterval" min="0" max="1440" aria-describedby="probeIntervalHint">
-            <span class="field__hint" id="probeIntervalHint">单位分钟，填 0 关闭定时测速。</span>
+            <div class="field__control">
+              <input type="number" id="probeInterval" min="0" max="1440">
+              <span class="field__unit">分钟（填 0 = 关闭）</span>
+            </div>
           </div>
           <div class="field field--inline">
-            <label class="field__label" for="failureThreshold">失败禁用阈值</label>
-            <input type="number" id="failureThreshold" min="1" max="10" aria-describedby="failureThresholdHint">
-            <span class="field__hint" id="failureThresholdHint">连续失败几次后自动禁用该节点。</span>
+            <label class="field__label" for="failureThreshold">连续失败几次禁用</label>
+            <div class="field__control">
+              <input type="number" id="failureThreshold" min="1" max="10">
+              <span class="field__unit">次</span>
+            </div>
           </div>
         </div>
         <div class="stack">
@@ -325,16 +355,26 @@
 
       <section class="card">
         <div class="card__head"><h2>绕过与日志</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>绕过列表怎么写</summary>
+          <div class="card__help__body">
+            <p>逗号分隔，列出的主机<strong>永不走代理</strong>。</p>
+            <p>本地地址与私有网段（<code>127.0.0.1</code>、<code>192.168.*</code> 等）始终绕过，
+              无需在此列出。</p>
+          </div>
+        </details>
         <div class="field-grid">
           <div class="field field--inline">
             <label class="field__label" for="bypassList">绕过列表</label>
-            <input type="text" id="bypassList" spellcheck="false" aria-describedby="bypassListHint">
-            <span class="field__hint" id="bypassListHint">逗号分隔；这些主机永不走代理。本地地址与私有网段始终绕过，无需在此列出。</span>
+            <input type="text" id="bypassList" spellcheck="false"
+              placeholder="example.com, cdn.example.net">
           </div>
           <div class="field field--inline">
             <label class="field__label" for="logLimit">日志保留条数</label>
-            <input type="number" id="logLimit" min="10" max="2000" step="10" aria-describedby="logLimitHint">
-            <span class="field__hint" id="logLimitHint">超出后丢弃最旧的记录。</span>
+            <div class="field__control">
+              <input type="number" id="logLimit" min="10" max="2000" step="10">
+              <span class="field__unit">条（超出后丢弃最旧的）</span>
+            </div>
           </div>
         </div>
         <p class="hint" id="settingsSaved" role="status"></p>

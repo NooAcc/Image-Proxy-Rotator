@@ -92,7 +92,18 @@ code, .mono {
 
 /* ---------------------------------------------------------------- 卡片 */
 
+/*
+ * 卡片内部用 grid 而不是给各块挂 margin。
+ *
+ * 理由是隐藏：`p { margin: 0 }` 之后，卡片里相邻的说明段落与表格是**贴在一起**的，
+ * 只有 .card__head 靠 margin-bottom 撑开一道缝。而条件 banner 收起时用的是
+ * `[hidden] { display: none }` —— margin 方案下它一藏，上下两块就又贴住了；
+ * grid 的 gap 只作用于真正参与布局的子项，藏起来的块不留缝也不留空隙。
+ */
 .card {
+  display: grid;
+  gap: var(--gap);
+  align-content: start;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -105,7 +116,70 @@ code, .mono {
   justify-content: space-between;
   gap: var(--gap);
   flex-wrap: wrap;
-  margin-bottom: var(--gap);
+}
+
+/* ------------------------------------------------------------ 卡片折叠帮助 */
+
+/*
+ * 「参考类」说明的唯一落点：配置时查一次，查完就不该再占着屏幕。
+ *
+ * 用 <details> 而不是 JS 弹层。弹层要自己管焦点、Esc、点击外部关闭和贴边翻转，
+ * 做一半比不做更糟 —— 同 popup.html 里不用 role="tablist" 的理由。<details>
+ * 零脚本、Tab 天然可达，收起时只剩一行小字。
+ *
+ * 它是 .card__head 的**兄弟**而不是子元素，这一点是刻意的：放进头部那一行，
+ * 展开的正文就困在 flex 项的宽度里，只能靠 flex-basis: 100% 换行把整块挤到下一行，
+ * 而那会让图标在展开的一瞬间从标题右侧跳到下一行左端。绝对定位到卡片右上角同样
+ * 不行 —— 有几张卡的头部右侧已经排着按钮，那是等着相撞的写法。让它老实占一行，
+ * 换来的是没有任何布局前提可以被后来的改动踩坏。
+ */
+.card__help {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  background: none;
+}
+
+.card__help > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  /* 默认的折叠三角在两个引擎里字形不一，统一换成自带的 ⓘ */
+  list-style: none;
+}
+
+.card__help > summary::-webkit-details-marker {
+  display: none;
+}
+
+.card__help > summary:hover,
+.card__help[open] > summary {
+  color: var(--fg);
+}
+
+.card__help__icon {
+  font-size: var(--text-md);
+  line-height: 1;
+}
+
+.card__help__body {
+  display: grid;
+  gap: 6px;
+  margin-block-start: var(--gap);
+  padding: var(--gap) var(--gap-lg);
+  border-inline-start: 2px solid var(--border);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+}
+
+/* 折叠正文里的 strong 是「这句话的重点」，不该比周围亮太多 */
+.card__help__body strong {
+  color: var(--fg);
+  font-weight: 600;
 }
 
 /* ---------------------------------------------------------------- 按钮 */
@@ -245,14 +319,35 @@ select[multiple] {
 }
 
 .field--inline > :where(input, select, textarea),
+.field--inline > .field__control,
 .field--inline > .field__hint {
   grid-column: 2;
 }
 
+/*
+ * 数字 + 单位是一件事，所以合成一格。
+ *
+ * 「单位毫秒。超过这个时间未响应即判定失败。」这类说明里，真正需要常驻的只有
+ * 「毫秒」两个字 —— 把它贴到输入框右侧，那一整行 .field__hint 就可以整条删掉。
+ */
+.field__control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 /* 数字铺满整行会让「1」这种值显得莫名，收窄并靠左 */
-.field--inline > input[type="number"] {
+.field__control > input[type="number"] {
+  flex: none;
   width: var(--field-num-w);
-  justify-self: start;
+}
+
+.field__unit {
+  flex: none;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
 }
 
 /* 标签在上、控件在下。给 textarea、多选列表这类天生要占满整行的控件用 */
@@ -268,6 +363,14 @@ select[multiple] {
   font-size: var(--text-md);
 }
 
+/*
+ * 单个字段的补充说明。
+ *
+ * 分流页把八条 .field__hint 全部拆解掉了（单位进 .field__unit、语义进 .card__help），
+ * 所以眼下没有任何字段在用它。留着是因为它是 aria-describedby 的落点 —— 将来某个
+ * 控件真需要一句只属于它自己的描述时，这里已经把栅格位置备好了，不必再试一遍
+ * 「说明放哪儿才不会把标签挤折行」。
+ */
 .field__hint {
   color: var(--fg-muted);
   font-size: var(--text-xs);

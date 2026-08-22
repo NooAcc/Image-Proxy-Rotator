@@ -170,6 +170,17 @@ function renderRunState() {
   setBanner($('applyError'), apply?.lastError ? `上次注入分流脚本失败：${apply.lastError}` : '', 'err');
 }
 
+/**
+ * 请求统计的 KPI。
+ *
+ * 这里的 `hint` 一律**按条件给**：数字正常时，解释它为什么可能不正常纯属噪音，
+ * 而九张卡片各挂一行常驻说明，等于把整屏最有用的数字挤到折叠线以下。所以
+ * 「什么算成功、耗时怎么算」这类随时成立的话进卡片的 .card__help 折叠区，
+ * 这里只留「这个数字现在不对劲」时才需要看到的那一句。
+ *
+ * 「命中但直连」的完整解释不在 hint 里 —— 它是全屏最值得响的警报，
+ * 单独走下面的 blindWarning，那里放得下具体条数和该怎么改。
+ */
 function renderRequestKpis() {
   const box = $('requestKpis');
   clear(box);
@@ -185,41 +196,45 @@ function renderRequestKpis() {
       value: req.successRate,
       unit: '%',
       tone: req.successRate === null ? '' : (req.successRate >= 95 ? 'ok' : 'warn'),
-      hint: 'HTTP 状态码小于 400 算成功',
     }),
-    kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms', hint: '只统计真的测到耗时的请求' }),
+    kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms' }),
     kpi({
       label: '真的走了代理',
       value: req.routed,
       unit: '次',
+      // routed = total - blind，所以「routed 为 0」与「blind 等于 total」是同一件事：
+      // 下面的 blindWarning 必然同时亮着，而且说得更具体。这里只留色调，不重复文字
       tone: req.total > 0 && req.routed === 0 ? 'err' : 'ok',
-      hint: '浏览器交给分流脚本的信息足够判定、且命中了规则的次数',
     }),
     kpi({
       label: '对端确认是代理',
       value: req.viaNodeIp,
       unit: '次',
       tone: req.routed > 0 && req.viaNodeIp === 0 ? 'warn' : 'ok',
-      hint: '响应来自你某个节点的地址 —— 这是「真的从代理回来了」的硬证据。'
-        + '即使多个节点共用地址、分不出是哪一个，这个数字照样成立',
+      hint: req.routed > 0 && req.viaNodeIp === 0 ? '没有响应来自你的节点地址' : '',
     }),
     kpi({
       label: '规则命中但直连',
       value: req.blind,
       unit: '次',
       tone: req.blind > 0 ? 'err' : '',
-      hint: 'HTTPS 请求只把「协议+域名+端口」交给分流脚本，路径和查询串会被剥掉。'
-        + '这个数字不为零就说明有规则依赖了路径，永远不会生效 —— 改用「域名」类型',
     }),
     kpi({
       label: '无法归因',
       value: req.unattributed,
       unit: '次',
       tone: req.unattributed > 0 ? 'warn' : '',
-      hint: '走了代理但认不出是哪个节点。多个节点共用同一个地址（只有端口不同）时必然如此 ——'
-        + '对端信息里只有 IP、没有端口',
+      hint: req.unattributed > 0 ? '认不出是哪个节点，多为共用地址所致' : '',
     }),
   );
+
+  // 头号故障模式，也是唯一值得占满一条 banner 的诊断：规则看起来对、实际一个请求都没代理出去
+  setBanner($('blindWarning'), req.blind > 0
+    ? `有 ${req.blind} 个请求命中了规则却仍然直连。`
+      + 'HTTPS 只把「协议 + 域名 + 端口」交给分流脚本，路径与查询串会被剥掉，'
+      + '所以依赖扩展名或路径的规则（例如 \\.jpg$）对 HTTPS 图片永远命中不了 —— '
+      + '不报错，只是安静地直连。把这类规则改成「域名」类型即可。'
+    : '', 'err');
 }
 
 /**
@@ -292,6 +307,16 @@ function renderRuleHits() {
   const empty = rows.length === 0;
   $('ruleHitEmpty').hidden = !empty;
   $('ruleHitTable').hidden = empty;
+
+  // 「有规则一次都没命中」只在真的有冷规则时才说，而且要说清是几条 ——
+  // 常驻一段「命中 0 次的规则值得查一下」，在全部命中时纯属占地方。
+  // 弹窗那边（popup.js 的冷规则提示）用的是同一个判定
+  const cold = rows.filter((row) => row.exists && row.hits === 0).length;
+  setBanner($('coldRuleNote'), cold > 0
+    ? `有 ${cold} 条规则一次都没命中：要么写错了，要么根本没有匹配的请求。`
+      + '可在「规则」分区用规则测试器逐条验证。'
+    : '', 'warn');
+
   if (empty) return;
 
   for (const row of rows) {
