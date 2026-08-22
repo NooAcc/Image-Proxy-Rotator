@@ -49,7 +49,7 @@ p { margin: 0; }
 
 a { color: var(--accent); }
 
-code, .mono {
+code {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
 }

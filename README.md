@@ -326,7 +326,7 @@ https://wsrv.nl/?url={url}
 ## 开发
 
 ```bash
-npm test      # 运行全部 458 个测试（node --test，零依赖）
+npm test      # 运行全部 503 个测试（node --test，零依赖）
 npm run check # 静态校验：manifest 引用、ESM 路径、命名导入、消息契约、架构约束
 npm run icons # 重新生成图标 PNG
 npm run verify # 上面两项一起跑

@@ -347,7 +347,7 @@ Metrics {
 ## 测试策略
 
 ```bash
-npm test    # 458 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
+npm test    # 503 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
 npm run check
 ```
 

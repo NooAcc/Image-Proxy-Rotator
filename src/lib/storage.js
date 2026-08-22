@@ -6,7 +6,7 @@
  */
 
 import { CONFIG_KEY, CONFIG_VERSION } from './constants.js';
-import { normalizeConfig, normalizeNode } from './schema.js';
+import { normalizeConfig } from './schema.js';
 
 export { normalizeConfig };
 
@@ -126,21 +126,4 @@ export function importConfig(text, current, options = {}) {
     base.rules.push(rule);
   }
   return normalizeConfig(base);
-}
-
-/** 追加节点并按 protocol|host|port 去重；返回 {config, added} */
-export function appendNodes(config, rawNodes) {
-  const base = normalizeConfig(config);
-  const seen = new Set(base.nodes.map(nodeKey));
-  let added = 0;
-  for (const raw of rawNodes) {
-    const node = normalizeNode(raw);
-    if (!node) continue;
-    const key = nodeKey(node);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    base.nodes.push(node);
-    added++;
-  }
-  return { config: base, added };
 }

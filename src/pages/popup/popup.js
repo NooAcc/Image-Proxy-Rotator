@@ -12,7 +12,7 @@
  */
 
 import { send, el, clear, fmtTime, fmtLatency, fmtAgo } from '../shared/api.js';
-import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar } from '../shared/ui.js';
+import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar, emptyState } from '../shared/ui.js';
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { validateRule } from '../../lib/rule-matcher.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
@@ -135,7 +135,7 @@ function renderBody() {
 
 function renderNodes(box) {
   if (config.nodes.length === 0) {
-    box.append(el('p', { class: 'empty', text: '还没有节点。点「设置」添加 HTTP/HTTPS 代理。' }));
+    box.append(emptyState('还没有节点。点「设置」添加 HTTP/HTTPS 代理。'));
     return;
   }
 
@@ -174,7 +174,7 @@ function renderNodes(box) {
 function renderRules(box) {
   const active = config.rules.filter((r) => r.enabled && validateRule(r).ok);
   if (active.length === 0) {
-    box.append(el('p', { class: 'empty', text: '没有生效的规则，当前所有请求都直连。' }));
+    box.append(emptyState('没有生效的规则，当前所有请求都直连。'));
     return;
   }
 
@@ -192,7 +192,7 @@ function renderRules(box) {
 
 function renderLogs(box) {
   if (logs.length === 0) {
-    box.append(el('p', { class: 'empty', text: '暂无记录。开启后访问漫画页即可看到分流情况。' }));
+    box.append(emptyState('暂无记录。开启后访问漫画页即可看到分流情况。'));
     return;
   }
 
@@ -227,7 +227,7 @@ function rankRow(name, amount, share, muted = false) {
 
 function renderMetrics(box) {
   if (!metrics) {
-    box.append(el('p', { class: 'empty', text: '正在读取统计…' }));
+    box.append(emptyState('正在读取统计…'));
     return;
   }
 
@@ -312,7 +312,7 @@ function renderMetrics(box) {
 
   const usedNodes = metrics.nodes.rows.filter((r) => r.used > 0).slice(0, TOP_N);  box.append(section(`节点用量${metrics.nodes.rows.length > TOP_N ? `（前 ${TOP_N}）` : ''}`,
     usedNodes.length === 0
-      ? el('p', { class: 'empty', text: '还没有请求被归因到具体节点。' })
+      ? emptyState('还没有请求被归因到具体节点。')
       : el('div', { class: 'ranks' }, ...usedNodes.map((r) => rankRow(r.name, r.used, r.share, !r.exists))),
   ));
 
@@ -320,7 +320,7 @@ function renderMetrics(box) {
   const coldCount = metrics.rules.rows.filter((r) => r.exists && r.hits === 0).length;
   box.append(section(`规则命中${metrics.rules.rows.length > TOP_N ? `（前 ${TOP_N}）` : ''}`,
     hitRules.length === 0
-      ? el('p', { class: 'empty', text: '还没有规则被命中。' })
+      ? emptyState('还没有规则被命中。')
       : el('div', { class: 'ranks' }, ...hitRules.map((r) => rankRow(r.name, r.hits, r.share, !r.exists))),
     // 「写了却从没命中」是最常见的配置错误，值得在这里点一句
     coldCount > 0
