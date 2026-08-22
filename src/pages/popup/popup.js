@@ -234,7 +234,13 @@ function renderMetrics(box) {
   const req = metrics.requests;
   box.append(section('请求',
     el('dl', { class: 'kpis' },
-      kpi({ label: '走代理', value: req.total, unit: '次' }),
+      kpi({ label: '命中规则', value: req.total, unit: '次' }),
+      kpi({
+        label: '真的走代理',
+        value: req.routed,
+        unit: '次',
+        tone: req.total > 0 && req.routed === 0 ? 'err' : 'ok',
+      }),
       kpi({
         label: '成功率',
         value: req.successRate,
@@ -242,6 +248,19 @@ function renderMetrics(box) {
         tone: req.successRate === null ? '' : (req.successRate >= 95 ? 'ok' : 'warn'),
       }),
       kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms' }),
+      kpi({
+        label: '对端是代理',
+        value: req.viaNodeIp,
+        unit: '次',
+        tone: req.routed > 0 && req.viaNodeIp === 0 ? 'warn' : 'ok',
+      }),
+      // 不为零就说明有规则依赖了 HTTPS 下看不见的路径 —— 最该先查的一项
+      kpi({
+        label: '命中但直连',
+        value: req.blind,
+        unit: '次',
+        tone: req.blind > 0 ? 'err' : '',
+      }),
       kpi({
         label: '无法归因',
         value: req.unattributed,

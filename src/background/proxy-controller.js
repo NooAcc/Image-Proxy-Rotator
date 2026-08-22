@@ -5,10 +5,11 @@
  * 都必须调一次 applyProxy()，否则 PAC 里的节点池会和实际配置脱节。
  */
 
-import { generatePac, pacSummary } from '../lib/pac-generator.js';
+import { generatePac, pacSummary, canRouteProbe } from '../lib/pac-generator.js';
 import { isAscii } from '../lib/ascii.js';
 import { getConfig, getRuntime, getLogger, saveRuntime } from './state.js';
 import { noteApplyMetric } from './metrics-store.js';
+
 
 /** 读取当前代理设置的控制权 */
 export async function readControl() {
@@ -137,3 +138,49 @@ export async function previewPac() {
     summary: pacSummary(config),
   };
 }
+
+/**
+ * 注入「测速专用」PAC：发往测速地址所在源的请求被强制路由到指定节点，不加兜底。
+ *
+ * 为什么必须换一份 PAC 而不是在 URL 上做标记：浏览器交给 PAC 的 https URL 已被剥掉
+ * path 与 query（见 lib/pac-url.js），标记根本传不进去。改成按「源」识别之后，
+ * 一次只能定向一个节点 —— 这就是测速从并发改成串行的原因。
+ *
+ * 三道闸，任何一道没过都必须让测速**失败**而不是「照发不误」：注入失败、
+ * ASCII 校验不过、代理设置控制权不在本扩展手上 —— 这三种情况下请求都会走别的通路，
+ * 测出来的数字与目标节点毫无关系。
+ *
+ * @param {string} nodeId
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+export async function applyProbePac(nodeId) {
+  const config = await getConfig();
+  if (!canRouteProbe(config, nodeId)) {
+    return { ok: false, error: '无法把测速请求定向到该节点（协议不受支持，或测速地址不是合法 URL）' };
+  }
+
+  const pac = generatePac(config, { startIndex: getRuntime().startIndex, probeNodeId: nodeId });
+  if (!isAscii(pac)) {
+    return { ok: false, error: '内部错误：测速用的分流脚本含非 ASCII 字符' };
+  }
+
+  try {
+    await chrome.proxy.settings.set({
+      value: { mode: 'pac_script', pacScript: { data: pac, mandatory: false } },
+      scope: 'regular',
+    });
+  } catch (e) {
+    return { ok: false, error: `无法注入测速用的代理设置：${String(e?.message || e)}` };
+  }
+
+  const control = await readControl();
+  getRuntime().control = control;
+  if (!control.controlled) {
+    return {
+      ok: false,
+      error: `浏览器代理设置的控制权是「${control.levelOfControl}」，测速请求不会走本扩展指定的节点`,
+    };
+  }
+  return { ok: true };
+}
+

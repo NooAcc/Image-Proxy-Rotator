@@ -33,7 +33,7 @@ test('emptyMetrics 每次都是新对象，字段齐全且全为零', () => {
   const b = emptyMetrics();
   assert.notEqual(a, b, '不能共享引用，否则两处计数会互相污染');
   assert.equal(a.since, null);
-  assert.deepEqual(a.requests, { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0 });
+  assert.deepEqual(a.requests, { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0, blind: 0, viaNodeIp: 0 });
   assert.deepEqual(a.perNode, {});
   assert.deepEqual(a.perRule, {});
   assert.deepEqual(a.retired, { nodeUsed: 0, nodeOk: 0, nodeFail: 0, ruleHits: 0 });

@@ -41,7 +41,8 @@ export function emptyMetrics() {
   return {
     /** 首次计数的时刻，面板用它显示「自 X 起累计」 */
     since: null,
-    requests: { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0 },
+    requests: { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0, blind: 0, viaNodeIp: 0 },
+
     /** @type {Record<string, {used: number, ok: number, fail: number}>} */
     perNode: {},
     /** @type {Record<string, {hits: number}>} */
@@ -110,18 +111,26 @@ function touch(metrics, at) {
 }
 
 /**
- * 记一次「命中规则、走了代理」的请求。
+ * 记一次「命中了用户规则」的请求。
+ *
+ * 注意 `blind` 与 `nodeId` 的关系：`blind` 表示浏览器压根没把足够的信息交给 PAC
+ * （https 请求的 path 与 query 被剥掉了，见 lib/pac-url.js），这次请求**必然**走的是
+ * 直连。既然原因已经确切知道，就不该再往 `unattributed` 里记一笔 —— 那一项的含义是
+ * 「走了代理但认不出是哪个节点」，两者混在一起会让人查错方向。
  *
  * @param {object} metrics 就地修改
  * @param {object} event
  * @param {boolean} event.ok HTTP 状态 < 400
  * @param {number} [event.latencyMs] 端到端耗时；缺失或非法则不计入平均值
- * @param {?string} [event.nodeId] 归因到的节点；归因失败时记入 unattributed
- * @param {?string} [event.ruleId] 命中的规则
+ * @param {?string} [event.nodeId] 归因到的**具体**节点；归因失败时记入 unattributed
+ * @param {boolean} [event.viaNodeIp] 对端 IP 属于某个节点（可能不止一个）—— 这是
+ *   「真的从代理回来了」的硬证据，即使分不出是哪个节点也成立
+ * @param {?string} [event.ruleId] 实际生效的规则；blind 时不计命中
+ * @param {boolean} [event.blind] 规则命中但 PAC 拿不到判定所需的信息，必然直连
  * @param {number} [event.at] 事件时刻
  * @returns {object} 同一个 metrics，便于链式调用
  */
-export function noteRequest(metrics, { ok, latencyMs, nodeId, ruleId, at } = {}) {
+export function noteRequest(metrics, { ok, latencyMs, nodeId, viaNodeIp = false, ruleId, blind = false, at } = {}) {
   touch(metrics, at);
   const req = metrics.requests;
   req.total++;
@@ -135,7 +144,16 @@ export function noteRequest(metrics, { ok, latencyMs, nodeId, ruleId, at } = {})
     req.latencyCount++;
   }
 
+  if (blind) {
+    req.blind++;
+    // 这条规则没有真的路由任何东西，不该让「规则命中」表格显示它在干活
+    return metrics;
+  }
+
+  if (viaNodeIp || nodeId) req.viaNodeIp++;
+
   if (nodeId) {
+
     const stat = metrics.perNode[nodeId] || (metrics.perNode[nodeId] = { used: 0, ok: 0, fail: 0 });
     stat.used++;
     if (ok) stat.ok++;
@@ -152,6 +170,7 @@ export function noteRequest(metrics, { ok, latencyMs, nodeId, ruleId, at } = {})
 
   return metrics;
 }
+
 
 /** 记一次延迟探测的结果 */
 export function noteProbe(metrics, { ok, at } = {}) {
@@ -301,9 +320,17 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       ok: req.ok,
       fail: req.fail,
       unattributed: req.unattributed,
+      // 对端 IP 属于某个节点的次数。分不出具体是哪个节点（多个节点共用一个地址）时
+      // 它照样成立 —— 「真的从代理回来了」和「是哪个节点」是两个问题
+      viaNodeIp: req.viaNodeIp,
+      // 命中了规则、却因为 https 剥掉了 path/query 而必然直连的次数。
+      // 这一项不为零就说明有规则写成了 PAC 判定不了的形态 —— 是最值得先查的信号
+      blind: req.blind,
+      routed: Math.max(0, req.total - req.blind),
       successRate: rate(req.ok, req.total),
       avgLatencyMs: req.latencyCount ? Math.round(req.latencySum / req.latencyCount) : null,
     },
+
     nodes: { rows: nodeRows, totalUsed: nodeTotal, retiredUsed: m.retired.nodeUsed },
     rules: { rows: ruleRows, totalHits: ruleTotal, retiredHits: m.retired.ruleHits },
     probe: {

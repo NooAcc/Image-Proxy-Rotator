@@ -1,10 +1,22 @@
 /**
  * 延迟探测与自动禁用。
  *
- * 探测原理（决策 D3）：给探测 URL 加上 `__pp_node=<节点id>` 参数，PAC 认出这个标记后
- * 强制把请求路由到指定节点，且**不加 DIRECT 兜底**。因此测出来的是「浏览器经该代理
- * 到公网」的真实端到端延迟，和实际图片请求走的是同一条通路；失败也是真失败，不会
- * 被静默直连掩盖。
+ * 探测原理（决策 D3 / D16）：测速必须**强制**走目标节点且**不加 DIRECT 兜底** ——
+ * 否则一个挂掉的节点会静默直连，测出来的延迟是假的，节点也永远不会被判失败。
+ *
+ * 定向的实现方式是 1.2.1 的关键修正。旧版把节点 id 写进测速 URL 的 query
+ * （`?__pp_node=<id>`）让 PAC 认，可 Chromium 在调用 PAC 之前就把 https URL 的
+ * path 与 query 剥掉了（见 lib/pac-url.js），标记根本传不到 PAC —— 于是每次测速都
+ * 按普通规则走，实际是直连，却被记成「该节点延迟 xx ms」。**测速看起来一直很正常，
+ * 代理却从未被使用过。**
+ *
+ * 现在改为：临时注入一份「把测速地址所在源定向到目标节点」的 PAC，测完再恢复。
+ * 代价是一次只能定向一个节点，所以测速由并发改成**串行**。这个代价是必须付的：
+ * 一个能骗人的并发测速比慢一点的诚实测速糟糕得多。
+ *
+ * 另一个后果：**测速期间会临时接管浏览器代理设置**，即使总开关是关的 —— 想测
+ * 「经该代理到公网的延迟」，就只能真的从那里出去一次。测完立刻恢复（总开关关着时
+ * 恢复成撤销代理设置）。
  *
  * 自动禁用只由探测结果驱动（决策 D8）—— 线上请求失败的原因太多（图片 404、站点 5xx、
  * 用户断网），据此禁用节点会把好节点全禁掉。
@@ -14,14 +26,29 @@ import { PROBE_PARAM, ALARM_PROBE, SLOW_LATENCY_MS, UNSUPPORTED_PROTOCOL_MESSAGE
 import { isSupported, protocolLabel } from '../lib/node-model.js';
 import { getConfig, updateConfig, getLogger, getRuntime, saveRuntime } from './state.js';
 import { noteProbeMetric } from './metrics-store.js';
-import { applyProxy } from './proxy-controller.js';
-
-/** 一次全量探测的并发上限，避免瞬间打出几十个请求 */
-const PROBE_CONCURRENCY = 5;
+import { applyProxy, applyProbePac } from './proxy-controller.js';
 
 let probeSeq = 0;
 
-/** 构造带节点标记的探测 URL */
+/**
+ * 是否有一轮测速正在进行。
+ *
+ * 串行定向让这个标志从「给 UI 看的状态」变成了**必须遵守的互斥锁**：一份 PAC 只能指向
+ * 一个节点，两轮测速重叠时后一轮注入的定向会覆盖前一轮的，于是「测节点 A 的请求」实际
+ * 走了节点 B —— 又一条会安静给出错数字的路径。测速现在可能要跑几十秒（节点多、串行），
+ * 用户重复点击很正常，所以宁可明确拒绝，也不要给出一个错的延迟。
+ */
+let probeInFlight = false;
+
+const BUSY_MESSAGE = '正在测速中，请等待当前一轮完成后再试';
+
+/**
+ * 构造探测 URL。
+ *
+ * `__pp_node` 已经不再由 PAC 读取（读不到），但仍然要带上：`webRequest` 看到的是完整
+ * URL，request-logger 靠它把这次请求认成「测速」而不是普通请求，并把观测到的对端 IP
+ * 记到节点上。
+ */
 function probeUrl(baseUrl, nodeId) {
   const url = new URL(baseUrl);
   url.searchParams.set(PROBE_PARAM, nodeId);
@@ -40,7 +67,44 @@ function describeError(error, aborted, timeoutMs) {
 }
 
 /**
- * 探测单个节点。
+ * 真正发一次测速请求。**调用前必须已经注入定向 PAC**，否则测的不是这个节点。
+ * @returns {Promise<{nodeId: string, ok: boolean, latencyMs: number|null, error: string|null}>}
+ */
+async function measure(nodeId, probe) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), probe.timeoutMs);
+  const startedAt = performance.now();
+  try {
+    await fetch(probeUrl(probe.url, nodeId), {
+      method: 'GET',
+      cache: 'no-store',
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    return { nodeId, ok: true, latencyMs: Math.round(performance.now() - startedAt), error: null };
+  } catch (e) {
+    return {
+      nodeId,
+      ok: false,
+      latencyMs: null,
+      error: describeError(e, controller.signal.aborted, probe.timeoutMs),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 定向 + 测量。不负责恢复 PAC —— 由调用方在整轮结束后统一恢复 */
+async function routeAndMeasure(node, probe) {
+  const routed = await applyProbePac(node.id);
+  if (!routed.ok) {
+    return { nodeId: node.id, ok: false, latencyMs: null, error: routed.error };
+  }
+  return measure(node.id, probe);
+}
+
+/**
+ * 探测单个节点（含 PAC 定向与恢复）。
  * @param {string} nodeId
  * @returns {Promise<{nodeId: string, ok: boolean, latencyMs: number|null, error: string|null}>}
  */
@@ -52,39 +116,29 @@ export async function probeNode(nodeId) {
   if (!isSupported(node)) {
     return { nodeId, ok: false, latencyMs: null, error: `${protocolLabel(node.protocol)}：${UNSUPPORTED_PROTOCOL_MESSAGE}`, unsupported: true };
   }
+  // 不落库、不计数：这不是节点的失败，是操作被拒绝
+  if (probeInFlight) return { nodeId, ok: false, latencyMs: null, error: BUSY_MESSAGE, busy: true };
 
-  const { timeoutMs } = config.settings.probe;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const startedAt = performance.now();
-
-  let result;
+  probeInFlight = true;
+  getRuntime().probing = true;
   try {
-    await fetch(probeUrl(config.settings.probe.url, nodeId), {
-      method: 'GET',
-      cache: 'no-store',
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-    result = { nodeId, ok: true, latencyMs: Math.round(performance.now() - startedAt), error: null };
-  } catch (e) {
-    result = {
-      nodeId,
-      ok: false,
-      latencyMs: null,
-      error: describeError(e, controller.signal.aborted, timeoutMs),
-    };
+    const result = await routeAndMeasure(node, config.settings.probe);
+    await recordProbeResult(nodeId, result);
+    return result;
   } finally {
-    clearTimeout(timer);
+    probeInFlight = false;
+    getRuntime().probing = false;
+    // 无论成败都要把 PAC 换回正常那份，否则测速地址会一直被钉在某个节点上
+    await applyProxy();
   }
-
-  await recordProbeResult(nodeId, result);
-  return result;
 }
+
 
 /**
  * 落库探测结果，并在连续失败达到阈值时自动禁用节点。
- * 节点池变化后必须重新注入 PAC，否则被禁用的节点还在轮询里。
+ *
+ * 不在这里 applyProxy()：整轮测速期间 PAC 一直是「定向」版本，中途重新注入会把
+ * 下一个节点的定向覆盖掉。恢复由 probeNode / probeAll 在最后统一做。
  */
 export async function recordProbeResult(nodeId, result) {
   const log = await getLogger();
@@ -150,17 +204,27 @@ export async function recordProbeResult(nodeId, result) {
     log.add({ level: 'error', kind: 'probe', nodeId, message: `节点「${name}」已自动禁用，轮询将跳过它（可在设置页手动重新启用）` });
   }
 
-  await applyProxy();
   return result;
 }
 
 /**
- * 探测全部节点（并发上限 PROBE_CONCURRENCY）。
+ * 探测全部节点。
+ *
+ * **串行**：一份 PAC 只能定向一个节点（见文件头）。节点很多时这一轮会比旧版慢，
+ * 换来的是每个数字都真的来自那个节点。
+ *
  * 被自动禁用的节点是否参与取决于 settings.probe.recoverProbe —— 参与才有机会恢复。
  */
 export async function probeAll() {
   const config = await getConfig();
   const runtime = getRuntime();
+
+  if (probeInFlight) {
+    const log = await getLogger();
+    log.add({ level: 'warn', kind: 'probe', message: BUSY_MESSAGE });
+    return [];
+  }
+
   // 只测支持的协议；不支持的节点连 PAC 都进不去，测它们纯属浪费请求
   const targets = config.nodes.filter(
     (n) => isSupported(n) && n.enabled && (!n.autoDisabled || config.settings.probe.recoverProbe),
@@ -179,23 +243,26 @@ export async function probeAll() {
     return [];
   }
 
+  probeInFlight = true;
   runtime.probing = true;
   const results = [];
-  const queue = [...targets];
   try {
-    const workers = Array.from({ length: Math.min(PROBE_CONCURRENCY, queue.length) }, async () => {
-      while (queue.length > 0) {
-        const node = queue.shift();
-        results.push(await probeNode(node.id));
-      }
-    });
-    await Promise.all(workers);
+    for (const node of targets) {
+      const result = await routeAndMeasure(node, config.settings.probe);
+      await recordProbeResult(node.id, result);
+      results.push(result);
+    }
   } finally {
+    probeInFlight = false;
     runtime.probing = false;
+    // 恢复正常 PAC —— 总开关关着时这一步会撤销代理设置，把浏览器还给用户
+    await applyProxy();
   }
   await saveRuntime();
   return results;
 }
+
+
 
 /** 按配置重建定时探测任务。chrome.alarms 的最小周期是 1 分钟 */
 export async function scheduleProbeAlarm() {

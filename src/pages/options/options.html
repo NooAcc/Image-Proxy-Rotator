@@ -59,8 +59,14 @@
       <section class="card">
         <div class="card__head"><h2>请求统计</h2></div>
         <p class="hint">
-          只统计<strong>命中规则、本该走代理</strong>的请求；直连的请求不计入。
+          只统计<strong>命中了你的规则</strong>的请求；其余请求本就该直连，不计入。
           成功的判定是 HTTP 状态码小于 400。
+        </p>
+        <p class="hint">
+          <strong>「命中但直连」不为零时先查这一项。</strong>HTTPS 请求交给分流脚本时，
+          浏览器只给出「协议 + 域名 + 端口」，路径与查询串会被剥掉。所以依赖扩展名或路径的
+          规则（例如 <code>\.jpg$</code>）对 HTTPS 图片永远命中不了 —— 不报错，只是安静地直连。
+          把这类规则改成「域名」类型即可。
         </p>
         <dl class="kpis" id="requestKpis"></dl>
       </section>
@@ -68,11 +74,11 @@
       <section class="card">
         <div class="card__head"><h2>节点使用分布</h2></div>
         <p class="hint">
-          归因靠请求的出口 IP，而出口 IP 要先测速才知道，所以总会有一部分请求归不到具体节点。
-          另外「无可用节点时」设为<strong>直连</strong>时，命中规则却实际走了直连的请求也归不上 ——
-          所以「无法归因」的数字异常大，往往说明代理根本没转发成功。这两种情况都单列在上面的
-          「无法归因」里，不会硬塞给某个节点。
+          归因靠请求的对端 IP —— 走代理时对端就是代理本身。<strong>只有 IP，没有端口</strong>，
+          所以多个节点共用同一个地址（只有端口不同）时无法区分，这些请求计入「无法归因」，
+          不会硬塞给某个节点。节点写成域名时要先测速一次才认得出。
         </p>
+        <div class="banner banner--warn" id="nodeUsageShared" hidden></div>
         <div class="table-wrap">
           <table id="nodeUsageTable">
             <thead>

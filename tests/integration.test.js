@@ -13,11 +13,11 @@ import assert from 'node:assert/strict';
 
 import { parseNodeList, decodeSubscription } from '../src/lib/node-parser.js';
 import { createNode, dedupeNodes, isSelectable, unsupportedNodes } from '../src/lib/node-model.js';
-import { createRule } from '../src/lib/rule-matcher.js';
+import { createRule, matchUrl, matchPacUrl, ruleWarnings } from '../src/lib/rule-matcher.js';
 import { createStore, exportConfig, importConfig } from '../src/lib/storage.js';
 import { generatePac, pacSummary } from '../src/lib/pac-generator.js';
 import { UNSUPPORTED_PROTOCOL_MESSAGE, PROBE_PARAM } from '../src/lib/constants.js';
-import { loadPac } from './helpers/pac-sandbox.js';
+import { loadPac, browserUrl } from './helpers/pac-sandbox.js';
 
 function fakeArea(initial = {}) {
   let data = { ...initial };
@@ -47,7 +47,10 @@ async function setup(pasted, rulePartial) {
   return { store, config: saved, parsed };
 }
 
-const MANGA = ['https://cdn.manga.com/ch1/001.jpg', 'cdn.manga.com'];
+/** 页面里真实发起的 URL */
+const MANGA_URL = 'https://cdn.manga.com/ch1/001.jpg';
+/** 浏览器真正递给 PAC 的东西（https 的路径与查询串已被剥掉） */
+const MANGA = browserUrl(MANGA_URL);
 
 test('主路径：粘贴 HTTP/HTTPS 节点 → 加规则 → 开启 → 匹配请求在节点间轮询', async () => {
   const { config } = await setup(
@@ -57,7 +60,7 @@ test('主路径：粘贴 HTTP/HTTPS 节点 → 加规则 → 开启 → 匹配�
       'http://user:pass@10.0.0.3:3128#线路三',
       '10.0.0.4:3128',
     ].join('\n'),
-    { name: '漫画图片', type: 'regex', pattern: '\\.(jpe?g|png|webp)(\\?.*)?$' },
+    { name: '漫画图片', type: 'host', pattern: 'manga.com' },
   );
 
   assert.equal(config.nodes.length, 4, '四个节点全部入库');
@@ -81,10 +84,10 @@ test('主路径：粘贴 HTTP/HTTPS 节点 → 加规则 → 开启 → 匹配�
 });
 
 test('主路径：不命中规则的请求保持直连', async () => {
-  const { config } = await setup('http://10.0.0.1:8080', { type: 'regex', pattern: '\\.jpg$' });
+  const { config } = await setup('http://10.0.0.1:8080', { type: 'host', pattern: 'manga.com' });
   const pac = loadPac(generatePac(config, {}));
-  assert.equal(pac.find('https://cdn.manga.com/app.js', 'cdn.manga.com'), 'DIRECT');
-  assert.equal(pac.find('https://www.example.com/', 'www.example.com'), 'DIRECT');
+  assert.equal(pac.find(...browserUrl('https://cdn.unrelated.com/app.js')), 'DIRECT');
+  assert.equal(pac.find(...browserUrl('https://www.example.com/')), 'DIRECT');
 });
 
 test('混合粘贴：只接纳 HTTP/HTTPS，其余逐条给出不支持提示', async () => {
@@ -99,7 +102,7 @@ test('混合粘贴：只接纳 HTTP/HTTPS，其余逐条给出不支持提示', 
     '完全无法识别的一行',
   ].join('\n');
 
-  const { config, parsed } = await setup(pasted, { type: 'regex', pattern: '\\.jpg$' });
+  const { config, parsed } = await setup(pasted, { type: 'host', pattern: 'manga.com' });
 
   assert.equal(parsed.nodes.length, 2, '只接纳 http 与 https');
   assert.equal(parsed.unsupported.length, 5, '五个不支持的节点被单独归类');
@@ -129,7 +132,7 @@ test('历史配置里的非 HTTP/HTTPS 节点不会静默参与分流', async ()
       { protocol: 'socks5', host: '10.0.0.9', port: 1080, name: '旧 SOCKS' },
       { protocol: 'vless', host: 'v.example.com', port: 443, name: '旧 VLESS' },
     ],
-    rules: [{ type: 'regex', pattern: '\\.jpg$', enabled: true, nodeIds: [] }],
+    rules: [{ type: 'host', pattern: 'manga.com', enabled: true, nodeIds: [] }],
   });
 
   const store = createStore(fakeArea());
@@ -155,7 +158,7 @@ test('历史配置里的非 HTTP/HTTPS 节点不会静默参与分流', async ()
 test('全部是不支持的节点时：不代理、不报错、正常直连', async () => {
   const { config } = await setup(
     'socks5://10.0.0.9:1080\nvless://uuid@v.example.com:443\nhysteria2://pw@h.example.com:443',
-    { type: 'regex', pattern: '\\.jpg$' },
+    { type: 'host', pattern: 'manga.com' },
   );
   assert.equal(config.nodes.length, 0, '一个都不入库');
   const pac = loadPac(generatePac(config, {}));
@@ -164,19 +167,21 @@ test('全部是不支持的节点时：不代理、不报错、正常直连', as
 
 test('测速请求被强制路由到指定节点，且不带直连兜底', async () => {
   const { config } = await setup('http://10.0.0.1:8080\nhttps://10.0.0.2:8443',
-    { type: 'regex', pattern: '\\.jpg$' });
-  const pac = loadPac(generatePac(config, {}));
+    { type: 'host', pattern: 'manga.com' });
   const target = config.nodes[1];
-  const decision = pac.find(
-    `https://cp.cloudflare.com/generate_204?${PROBE_PARAM}=${target.id}&_pp_t=1`,
-    'cp.cloudflare.com',
-  );
-  assert.equal(decision, 'HTTPS 10.0.0.2:8443', '必须精确命中目标节点且无兜底');
+  // 定向靠的是「为这一个节点单独生成一份 PAC」，而不是往 URL 上挂标记 ——
+  // https 的 query 到不了 PAC（见 src/lib/pac-url.js）
+  const pac = loadPac(generatePac(config, { probeNodeId: target.id }));
+  const probed = browserUrl(`${config.settings.probe.url}?${PROBE_PARAM}=${target.id}&_pp_t=1`);
+  assert.equal(pac.find(...probed), 'HTTPS 10.0.0.2:8443', '必须精确命中目标节点且无兜底');
+
+  // 普通 PAC 对测速地址没有任何特殊待遇
+  assert.equal(loadPac(generatePac(config, {})).find(...probed), 'DIRECT');
 });
 
 test('测速失败导致自动禁用后，该节点从轮询中消失', async () => {
   const { store, config } = await setup('http://10.0.0.1:8080\nhttp://10.0.0.2:8080',
-    { type: 'regex', pattern: '\\.jpg$' });
+    { type: 'host', pattern: 'manga.com' });
 
   // 模拟 health-monitor 对第二个节点判定失败并自动禁用
   const next = structuredClone(config);
@@ -192,16 +197,28 @@ test('测速失败导致自动禁用后，该节点从轮询中消失', async ()
   assert.equal(pacSummary(saved).nodeCount, 1);
 
   // 但它仍然可以被单独测速（否则永远无法恢复）
-  assert.equal(
-    pac.find(`https://probe/x?${PROBE_PARAM}=${saved.nodes[1].id}`, 'probe'),
-    'PROXY 10.0.0.2:8080',
-  );
+  const recover = loadPac(generatePac(saved, { probeNodeId: saved.nodes[1].id }));
+  assert.equal(recover.find(...browserUrl(saved.settings.probe.url)), 'PROXY 10.0.0.2:8080');
 });
+
+test('依赖路径的规则会被如实报告成「HTTPS 下不生效」，而不是静默直连', async () => {
+  // 这就是 1.2.0 的病根：README 教用户开启 `\.(jpe?g|png|webp)$`，而浏览器交给 PAC 的
+  // 只有 https://cdn.manga.com/ —— 规则永远不命中，图片全部直连，代理一点流量都没有。
+  const { config } = await setup('http://10.0.0.1:8080',
+    { name: '扩展名', type: 'regex', pattern: '\\.(jpe?g|png|webp)$' });
+  const pac = loadPac(generatePac(config, {}));
+
+  assert.equal(pac.find(...MANGA), 'DIRECT', '事实如此：这条规则对 HTTPS 不生效');
+  assert.ok(matchUrl(MANGA_URL, config.rules), '用户的意图确实是代理这张图');
+  assert.equal(matchPacUrl(MANGA_URL, config.rules), null, '而实际不会走代理');
+  assert.ok(ruleWarnings(config.rules[0]).some((w) => /HTTPS/.test(w)), '必须给出明确提示');
+});
+
 
 test('配置导出再导入后，分流行为完全一致', async () => {
   const { config } = await setup(
     'http://10.0.0.1:8080#A\nhttps://10.0.0.2:8443#B\nhttp://u:p@10.0.0.3:3128#C',
-    { name: '图片', type: 'regex', pattern: '\\.(jpe?g|webp)$' },
+    { name: '图片', type: 'host', pattern: 'manga.com' },
   );
 
   const restored = importConfig(exportConfig(config), config, { merge: false });
@@ -226,7 +243,7 @@ test('总开关关闭时，无论配置多完整都全部直连', async () => {
 
 test('PAC 里不含任何代理账号密码', async () => {
   const { config } = await setup('http://alice:topsecret@10.0.0.1:8080',
-    { type: 'regex', pattern: '\\.jpg$' });
+    { type: 'host', pattern: 'manga.com' });
   const source = generatePac(config, {});
   assert.ok(!source.includes('topsecret'), '密码绝不能出现在 PAC 里');
   assert.ok(!source.includes('alice'), '用户名绝不能出现在 PAC 里');

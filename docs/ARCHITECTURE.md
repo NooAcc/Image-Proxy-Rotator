@@ -23,11 +23,11 @@
                               │ 复用
 ┌─────────────────────────────▼────────────────────────────────┐
 │ src/lib/（纯 JS，零 chrome 依赖，全量单测）                    │
-│  constants  hash  schema  storage  ascii                      │
+│  constants  hash  schema  storage  ascii  pac-url             │
 │  node-parser  node-model  rule-matcher  scheduler             │
 │  pac-generator  logger  metrics                               │
 └─────────────────────────────┬────────────────────────────────┘
-                              │ 生成 PAC 字符串（保证纯 ASCII）
+                              │ 生成 PAC 字符串（纯 ASCII，只依赖 scheme+host+port）
 ┌─────────────────────────────▼────────────────────────────────┐
 │ chrome.proxy.settings（mode: "pac_script"）                   │
 │  浏览器网络栈按 FindProxyForURL 的返回值选择出口               │
@@ -42,7 +42,7 @@
 |---|---|---|
 | **D1** | 路由核心用 `chrome.proxy` 的 **PAC 脚本模式** | 这是扩展唯一能让浏览器网络栈真正走不同代理的 API。`fetch` 无法指定代理；`declarativeNetRequest` 只能改 URL，不能改传输层；`mode:'fixed_servers'` 只能配单个代理，无法轮询 |
 | **D2** | **轮询计数器放在 PAC 脚本的模块作用域** | PAC 上下文在多次 `FindProxyForURL` 调用之间保持变量，因此计数器可以驻留其中，无需每请求与 Service Worker 通信（PAC 也没有这个能力） |
-| **D3** | 测速 = 给测速 URL 加内部参数 `__pp_node=<节点id>`，PAC 认出后**强制**走该节点且**不加直连兜底** | 测的是「浏览器经该代理到公网」的真实端到端链路，与图片请求同一条通路；没有兜底所以失败是真失败。顺带能从 `webRequest.onCompleted.ip` 拿到出口 IP，直接证明分流生效 |
+| **D3** | 测速 = 为目标节点**单独注入一份 PAC**，把测速地址所在的源强制路由到它，且**不加直连兜底**；测完恢复 | 测的是「浏览器经该代理到公网」的真实端到端链路，与图片请求同一条通路；没有兜底所以失败是真失败。定向信息不能放在 URL 的 query 里 —— https 的 query 根本到不了 PAC（D16），旧版正是因此每次测速都测到了直连的延迟。代价是一份 PAC 只能定向一个节点，测速由并发改为**串行** |
 | **D4** | **只支持 HTTP / HTTPS 代理**，其余类型识别但不接纳 | 见 [LIMITATIONS.md](LIMITATIONS.md) 第 1 节。不支持的类型仍被识别，只为给出准确的中文提示 —— 识别而不接纳，比静默丢弃更不容易让用户困惑 |
 | **D5** | 可用性判定收敛到 **`pacToken()` 单一出口** | 只有 `SUPPORTED_PROTOCOLS`（http/https）能拿到 token，其余返回 `null`。`isSelectable`、PAC 节点池、状态统计全都建立在它之上，因此不存在「某个不支持的协议从别的路径漏进轮询」的可能 |
 | **D6** | 纯逻辑与 Chrome API **物理隔离**：`src/lib/` 不出现 `chrome.` | 让 PAC 生成、节点解析、规则匹配、调度这些最易错的部分能在 Node 里 TDD。`npm run check` 强制这条约束 |
@@ -55,23 +55,31 @@
 | **D13** | 生成的 PAC **必须是纯 ASCII**：注释只写英文，数据经 `asciiJson()` 转义，域名经 `toAsciiHost()` 转 Punycode | `chrome.proxy` 会因为一个非 ASCII 字节就**整体**拒绝 `pacScript.data`，而拒绝之后浏览器照旧直连、图片照样加载 —— 故障表现为「扩展安静地什么都没做」，极难自查。见 [LIMITATIONS.md](LIMITATIONS.md) 第 11 节 |
 | **D14** | 统计**只存聚合计数器，不存请求明细** | 事件流的体积随使用时长无界增长，早晚要配淘汰策略甚至 IndexedDB。而「总量 / 成功率 / 哪个节点在干活 / 哪条规则从没命中」全都能用 O(1) 的整数回答。于是占用只随节点数与规则数增长，与运行时长无关 |
 | **D15** | 计数写入**节流落盘**（≥5 秒或攒够 50 次改动），日志写入同样节流（3 秒） | 计数发生在 `webRequest.onCompleted` 上，一个漫画页能打出几百个图片请求。代价是 Service Worker 被回收时最多丢一个窗口的数据 —— 统计不是账本，用这点精度换掉几百倍写放大是划算的 |
+| **D16** | **一切判定只能依赖 scheme + host + port**：URL 形态的规则一律附带退化形式；测速改为「串行 + 为单个节点单独注入定向 PAC」 | Chromium 在调用 PAC 前会清掉 https/wss 的 path 与 query（`SanitizeUrl`，52 起，无法关闭）。依赖路径的规则和「把节点 id 写进测速 URL query」这两件事因此双双静默失效：规则不命中就直连、图片照样加载，测速则测到的是直连延迟 —— 表现为「统计说走了 277 次代理，代理后台一条连接都没有」。详见 [LIMITATIONS.md](LIMITATIONS.md) 第 12 节 |
+| **D17** | 「命中规则」与「真的走代理」是**两个不同的量**，统计里分别记为 `total` 与 `routed`，差值单列为 `blind` | 这两个量在 1.2.0 里是同一个数字，于是统计成了故障的帮凶而不是线索。分开之后，`blind` 不为零就直接指向「有规则写成了 PAC 判定不了的形态」 |
+| **D18** | 归因**只在对端 IP 唯一指向一个节点时**才落到该节点；匹配到多个就计入 `unattributed` 并说明原因。另设 `viaNodeIp` 回答「是不是真从代理回来的」 | `webRequest` 只给对端 IP，不给端口。而「一台机器几十个端口、每个端口一个出口」是最常见形态，这种配置下节点的 `host` 全都相同。取第一个匹配会把全部用量记到列表里第一个节点上，面板显示「1 个节点 100%、其余全 0」，看起来像轮询坏了 —— 分不出来就该说分不出来。见 [LIMITATIONS.md](LIMITATIONS.md) 第 13 节 |
+| **D19** | 测速全程持一把**互斥锁**，重复触发直接拒绝 | 串行定向之后一份 PAC 只能指向一个节点，两轮测速重叠时后一轮会覆盖前一轮的定向，「测 A 的请求」实际走了 B。而串行测速可能要跑几十秒，用户重复点击很正常 —— 宁可明确拒绝，也不要给出一个错的延迟 |
 
 ---
 
 ## 一次图片请求的完整生命周期
 
 1. 页面发起 `https://cdn.manga.com/001.jpg` 的图片请求。
-2. 浏览器网络栈调用 PAC 的 `FindProxyForURL(url, host)`。
+2. 浏览器**净化** URL，然后调用 PAC 的 `FindProxyForURL(url, host)`。
+   https 请求到这一步只剩 `https://cdn.manga.com/` —— path 与 query 已被剥掉（决策 D16）。
 3. PAC 依次判断：
-   1. 总开关关闭 → `DIRECT`
-   2. URL 里有 `__pp_node=` → 这是测速请求，强制返回该节点的 token（无兜底）
+   1. 有测速定向且 URL 属于测速地址所在源 → 强制返回该节点的 token（无兜底，见 D3）
+   2. 总开关关闭 → `DIRECT`
    3. 主机命中绕过列表 / 单段主机名 / 私有网段 → `DIRECT`
-   4. 逐条匹配规则池，命中则取出该规则对应的节点 token 数组
+   4. 逐条匹配规则池：先按规则字面语义匹配，未命中且 URL 被净化过时再试一次退化形式；
+      命中则取出该规则对应的节点 token 数组
    5. 用模块作用域的计数器取一个 token，按 `rotateEvery` 决定是否前进
    6. `fallback === 'direct'` 时返回 `"PROXY 1.2.3.4:8080; DIRECT"`，否则不带兜底
 4. 网络栈按返回值连接代理。若代理要求认证 → `onAuthRequired` 按主机端口匹配节点并自动应答。
-5. 请求完成 → `webRequest.onCompleted` 观测到状态码与**对端 IP**；若该 URL 命中规则则写一条日志，
-   并把结果计入统计（只记录，不改节点状态）。归因靠出口 IP，认不出来的记进 `unattributed`。
+5. 请求完成 → `webRequest.onCompleted` 观测到状态码与**对端 IP**（走代理时对端就是代理本身）。
+   这里拿到的是**完整** URL，所以要做两次匹配：`matchPacUrl()` 回答「真的走代理了吗」，
+   `matchUrl()` 回答「用户想代理它吗」。前者不中、后者中的记为 `blind`（决策 D17）。
+   归因按对端 IP 反查节点，唯一命中才落到该节点；多个节点共用地址时只记 `viaNodeIp`（决策 D18）。
 6. 状态弹窗每 2 秒拉一次日志与统计并刷新展示；设置页只在「统计」那一屏可见时每 5 秒拉一次。
 
 ---
@@ -105,7 +113,7 @@ Node {
     lastCheckedAt: ?number,
     consecutiveFailures: number,
     lastError: ?string,
-    egressIp: ?string,       // 测速请求实际出口 IP，是分流生效的硬证据
+    egressIp: ?string,       // 测速时观测到的对端 IP（走代理时就是代理本身），用于给线上请求归因
   },
   raw: string,               // 原始链接
   meta: object,              // 链接里的额外 query 参数
@@ -137,13 +145,15 @@ Settings {
 ```js
 Metrics {
   since: ?number,              // 首次计数的时刻，面板显示「自 X 起累计」
-  requests: {                  // 只统计命中规则、本该走代理的请求
+  requests: {                  // 只统计命中了用户规则的请求
     total, ok, fail,
     latencySum, latencyCount,  // 分开存，才能既算平均值又不把「没测到」当 0
-    unattributed,              // 按出口 IP 认不出是哪个节点的次数
+    unattributed,              // 走了代理但按对端 IP 认不出是哪个节点的次数
+    blind,                     // 命中规则、但 PAC 判定不了因而必然直连的次数（决策 D17）
+    viaNodeIp,                 // 对端 IP 属于某个节点的次数 —— 分不出是哪个时照样成立（决策 D18）
   },
   perNode: { [nodeId]: { used, ok, fail } },
-  perRule: { [ruleId]: { hits } },
+  perRule: { [ruleId]: { hits } },   // 只记真的路由出去的命中
   retired: { nodeUsed, nodeOk, nodeFail, ruleHits },  // 已删除实体的历史量
   probe:  { ok, fail, lastAt },
   apply:  { ok, fail, lastAt, lastError },
@@ -173,11 +183,12 @@ Metrics {
 | `lib/constants.js` | 默认配置、`SUPPORTED_PROTOCOLS`、统一提示文案 |
 | `lib/hash.js` | FNV-1a 稳定哈希与 id 生成（不用随机数，保证重复导入 id 不变） |
 | `lib/ascii.js` | ASCII 安全化：`asciiJson()` 转义、`toAsciiHost()` 转 Punycode（守护 D13） |
+| `lib/pac-url.js` | 复刻浏览器交给 PAC 之前的 URL 净化，并从 URL 形态的规则里提取退化形式（守护 D16） |
 | `lib/schema.js` | 持久化结构规范化，永不抛异常 |
 | `lib/storage.js` | 读写、版本迁移、导入导出（StorageArea 注入，便于测试） |
 | `lib/node-parser.js` | 节点链接与订阅解析；把每行分类为 节点 / 不支持 / 非法 / 注释 |
 | `lib/node-model.js` | `pacToken()`（可用性唯一闸门）、`isSelectable()`、提示语生成 |
-| `lib/rule-matcher.js` | 规则构造、校验、编译、匹配、`ruleWarnings()` |
+| `lib/rule-matcher.js` | 规则构造、校验、编译、匹配、退化形式、`matchPacUrl()`、`ruleWarnings()` |
 | `lib/scheduler.js` | 节点池计算、轮询与哈希选择（PAC 之外的可测实现） |
 | `lib/pac-generator.js` | 把配置编译成 PAC 脚本字符串（保证纯 ASCII） |
 | `lib/logger.js` | 环形日志缓冲 |
@@ -199,7 +210,7 @@ Metrics {
 ## 测试策略
 
 ```bash
-npm test    # 271 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
+npm test    # 308 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
 npm run check
 ```
 
@@ -207,12 +218,18 @@ npm run check
 
 | 层 | 文件 | 手法 |
 |---|---|---|
-| 纯逻辑单元 | `tests/{storage,node-parser,node-model,rule-matcher,scheduler,logger,ascii,metrics}.test.js` | 直接调 `src/lib/`，零依赖 |
+| 纯逻辑单元 | `tests/{storage,node-parser,node-model,rule-matcher,scheduler,logger,ascii,metrics,pac-url}.test.js` | 直接调 `src/lib/`，零依赖 |
 | PAC 行为 | `tests/pac-generator.test.js` | `node:vm` 沙箱**真的执行**生成的脚本 |
 | 主链路集成 | `tests/integration.test.js` | 从「用户粘贴的文本」一路跑到「PAC 做出路由决策」 |
 | 后台编排 | `tests/background.test.js`、`tests/service-worker.test.js` | `tests/helpers/chrome-stub.js` 提供 `chrome.*` 与 `fetch` 替身 |
 | UI 契约 | `tests/ui-{tokens,contract,status,components}.test.js` | 静态解析 CSS/HTML/JS；组件构造器用极小 DOM 替身 |
 | 打包产物 | `tests/pack.test.js` | 用另写一份的 zip 解析器把包拆回来逐字节比对 |
+
+**一条不可违反的纪律（决策 D16 的教训）**：任何调用 `FindProxyForURL` 的断言都必须先经
+`tests/helpers/pac-sandbox.js` 的 `browserUrl()` 走一遍。浏览器不会把完整的 https URL 交给
+PAC，直接手写 `pac.find('https://a.com/1.jpg', 'a.com')` 的测试会给出与线上**相反**的结论。
+1.2.0 就是这样发布的：271 个测试全绿，扩展一个请求都没代理出去。`browserUrl()` 刻意不复用
+`src/lib/pac-url.js`，两套独立实现互为对照。
 
 UI 这一层大部分没有 DOM 环境，所以只测**能静态判定、且出错时浏览器不会报警**的东西：
 

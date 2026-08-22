@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createRule, validateRule, compileRule, matchUrl, wildcardToRegexSource, makeRuleId, ruleWarnings } from '../src/lib/rule-matcher.js';
+import { createRule, validateRule, compileRule, matchUrl, matchPacUrl, sanitizedScope, wildcardToRegexSource, makeRuleId, ruleWarnings } from '../src/lib/rule-matcher.js';
 
 const R = (o) => createRule({ type: 'exact', pattern: '', enabled: true, ...o });
 
@@ -126,8 +126,7 @@ test('ruleWarnings 对 URL 形态里的非 ASCII 给出提示', () => {
   // 静默失效比报错更难排查，所以必须显式提示
   for (const type of ['exact', 'prefix', 'wildcard', 'regex']) {
     const warnings = ruleWarnings(R({ type, pattern: 'https://漫画.com/a.jpg' }));
-    assert.equal(warnings.length, 1, `${type} 应给出一条提示`);
-    assert.match(warnings[0], /Punycode/);
+    assert.ok(warnings.some((w) => /Punycode/.test(w)), `${type} 应给出 Punycode 提示`);
   }
 });
 
@@ -135,12 +134,83 @@ test('ruleWarnings 对 host 型的中文域名不提示（我们已自动转码�
   assert.deepEqual(ruleWarnings(R({ type: 'host', pattern: '漫画.com' })), []);
 });
 
-test('ruleWarnings 对纯 ASCII 规则不提示', () => {
-  assert.deepEqual(ruleWarnings(R({ type: 'regex', pattern: '\.(jpe?g|png)$' })), []);
+test('ruleWarnings 说明 HTTPS 下路径不可见（这是本扩展最容易踩的坑）', () => {
+  // 依赖扩展名的正则：HTTPS 下永远命中不了，必须明说
+  const rx = ruleWarnings(R({ type: 'regex', pattern: '\\.(jpe?g|png)$' }));
+  assert.equal(rx.length, 1, '应给出一条提示，实际：' + JSON.stringify(rx));
+  assert.match(rx[0], /HTTPS/);
+
+  // 只约束域名的正则：HTTPS 下照样有效，不该打扰用户
+  assert.deepEqual(ruleWarnings(R({ type: 'regex', pattern: '^https?://(img|cdn)\\d*\\.' })), []);
+  assert.deepEqual(ruleWarnings(R({ type: 'regex', pattern: 'manga\\.com' })), []);
+
+  // 能退化的类型：告知范围被放宽，并给出退化后的实际范围
+  const pre = ruleWarnings(R({ type: 'prefix', pattern: 'https://cdn.manga.com/img/' }));
+  assert.equal(pre.length, 1);
+  assert.match(pre[0], /https:\/\/cdn\.manga\.com\//);
+
+  // 连方案都通配、推不出域名的写法：明说对 HTTPS 无效
+  const bad = ruleWarnings(R({ type: 'wildcard', pattern: '*/img/*.jpg' }));
+  assert.equal(bad.length, 1);
+  assert.match(bad[0], /不会生效|命中不了/);
+});
+
+test('ruleWarnings 对纯 ASCII 的域名规则不提示', () => {
   assert.deepEqual(ruleWarnings(R({ type: 'host', pattern: 'manga.com' })), []);
 });
+
 
 test('ruleWarnings 对非法规则不提示（合法性由 validateRule 负责）', () => {
   assert.deepEqual(ruleWarnings({ type: 'regex', pattern: '([漫画' }), []);
   assert.deepEqual(ruleWarnings(null), []);
+});
+
+// -------------------------------------------------- 与 PAC 一致的判定（决策 D16）
+
+test('matchPacUrl 按浏览器实际递给 PAC 的 URL 判定，matchUrl 只代表用户意图', () => {
+  const rules = [R({ id: 'r_ext00001', type: 'regex', pattern: '\\.jpg$', name: '扩展名' })];
+  const url = 'https://cdn.manga.com/img/1.jpg';
+  assert.equal(matchUrl(url, rules)?.name, '扩展名', '完整 URL 上确实命中');
+  assert.equal(matchPacUrl(url, rules), null, 'PAC 只看到 https://cdn.manga.com/，不可能命中');
+  // http 的路径不会被剥掉，两者结论一致
+  const http = 'http://cdn.manga.com/img/1.jpg';
+  assert.equal(matchPacUrl(http, rules)?.name, '扩展名');
+});
+
+test('matchPacUrl 对 host 型规则与完整 URL 判定一致', () => {
+  const rules = [R({ id: 'r_host0001', type: 'host', pattern: 'manga.com', name: '域名' })];
+  for (const url of ['https://cdn.manga.com/1.jpg', 'http://manga.com/a?b=c', 'wss://push.manga.com/s']) {
+    assert.equal(matchPacUrl(url, rules)?.name, '域名', url);
+  }
+  assert.equal(matchPacUrl('https://notmanga.com/1.jpg', rules), null);
+});
+
+test('sanitizedScope：只有 URL 形态的规则有退化形式', () => {
+  assert.equal(sanitizedScope(R({ type: 'host', pattern: 'manga.com' })), null, 'host 本来就安全');
+  assert.equal(sanitizedScope(R({ type: 'regex', pattern: '\\.jpg$' })), null, '正则推不出域名');
+
+  assert.deepEqual(sanitizedScope(R({ type: 'prefix', pattern: 'https://cdn.m.com/img/' })),
+    { glob: false, pat: 'https://cdn.m.com/', rx: null });
+  assert.deepEqual(sanitizedScope(R({ type: 'exact', pattern: 'https://cdn.m.com/1.jpg' })),
+    { glob: false, pat: 'https://cdn.m.com/', rx: null });
+
+  // 默认端口要被归一化掉，否则退化前缀永远匹配不上
+  assert.equal(sanitizedScope(R({ type: 'prefix', pattern: 'https://m.com:443/x' })).pat, 'https://m.com/');
+  assert.equal(sanitizedScope(R({ type: 'prefix', pattern: 'https://m.com:8443/x' })).pat, 'https://m.com:8443/');
+
+  const wild = sanitizedScope(R({ type: 'wildcard', pattern: 'https://*.m.com/img/*.jpg' }));
+  assert.equal(wild.glob, true);
+  assert.equal(wild.pat, 'https://*.m.com/');
+  assert.ok(new RegExp(wild.rx).test('https://cdn1.m.com/'));
+  assert.ok(!new RegExp(wild.rx).test('https://cdn1.other.com/'));
+
+  // 方案本身被通配时无解，必须返回 null 而不是编出一个错的前缀
+  assert.equal(sanitizedScope(R({ type: 'wildcard', pattern: '*://m.com/*' })), null);
+  assert.equal(sanitizedScope(R({ type: 'prefix', pattern: '/img/' })), null);
+});
+
+test('compileRule 的编译结果按规则对象缓存（热路径上每请求都会调它）', () => {
+  const rule = R({ type: 'host', pattern: 'manga.com' });
+  assert.equal(compileRule(rule), compileRule(rule), '同一个规则对象应复用编译结果');
+  assert.notEqual(compileRule(rule), compileRule({ ...rule }), '换了对象就要重新编译');
 });

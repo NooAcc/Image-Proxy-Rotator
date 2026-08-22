@@ -122,7 +122,7 @@ export async function metricsView() {
   return summarizeMetrics(metrics, { nodes: config.nodes, rules: config.rules });
 }
 
-/** 记一次命中规则、走了代理的请求 */
+/** 记一次命中了用户规则的请求（event.blind 区分「真的走代理」与「注定直连」） */
 export async function noteRequestMetric(event) {
   noteRequest(await load(), event);
   schedule();

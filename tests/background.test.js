@@ -14,7 +14,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installChromeStub, nodeFixture } from './helpers/chrome-stub.js';
-import { loadPac } from './helpers/pac-sandbox.js';
+import { loadPac, browserUrl } from './helpers/pac-sandbox.js';
+
 
 const stub = installChromeStub();
 
@@ -34,8 +35,21 @@ assert.equal(installAuthProvider(), true, 'onAuthRequired 监听器应注册成�
 
 // ---------------------------------------------------------------- 夹具
 
-const IMG = ['https://cdn.manga.com/ch1/001.jpg', 'cdn.manga.com'];
-const RULE = { id: 'r_aaaaaaa1', name: '图片', type: 'regex', pattern: '\\.jpg$', enabled: true, nodeIds: [] };
+/** webRequest 看到的完整 URL —— 它拿得到路径 */
+const IMG_URL = 'https://cdn.manga.com/ch1/001.jpg';
+/** PAC 看到的东西 —— https 的路径与查询串已被浏览器剥掉，两者刻意不同 */
+const IMG = browserUrl(IMG_URL);
+/**
+ * 夹具规则用「域名」型。
+ *
+ * 之前这里是 `regex \.jpg$`，配上直接喂完整 URL 的断言，整套后台测试都是绿的 ——
+ * 而那条规则在真实浏览器里对 HTTPS 图片永远命中不了。判定必须建立在浏览器真正
+ * 递给 PAC 的东西上；依赖路径的规则另有专门用例覆盖（见「规则命中但实际直连」）。
+ */
+const RULE = { id: 'r_aaaaaaa1', name: '图片', type: 'host', pattern: 'manga.com', enabled: true, nodeIds: [] };
+/** 依赖路径的规则：HTTPS 下 PAC 判定不了，必然直连 */
+const BLIND_RULE = { id: 'r_bbbbbbb2', name: '扩展名', type: 'regex', pattern: '\\.jpg$', enabled: true, nodeIds: [] };
+
 
 /** 重置存储、运行时态、统计与日志，并写入一份新配置 */
 async function seed(partial = {}) {
@@ -431,8 +445,8 @@ test('地址匹配但协议不支持时，说清是类型问题而不是密码�
 test('请求观测只记日志，绝不因线上失败禁用节点（决策 D8）', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
 
-  await stub.emit('onBeforeRequest', { requestId: 'req-1', url: IMG[0] });
-  await stub.emit('onCompleted', { requestId: 'req-1', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onBeforeRequest', { requestId: 'req-1', url: IMG_URL });
+  await stub.emit('onCompleted', { requestId: 'req-1', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
 
   let rows = await logsOf({ kind: 'request' });
   assert.equal(rows.length, 1);
@@ -453,7 +467,7 @@ test('不命中规则的请求不记日志；测速请求只补出口 IP', async
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
 
   await stub.emit('onCompleted', {
-    requestId: 'req-3', url: 'https://cdn.manga.com/app.js', statusCode: 200, ip: '1.1.1.1',
+    requestId: 'req-3', url: 'https://cdn.unrelated.com/app.js', statusCode: 200, ip: '1.1.1.1',
   });
   assert.equal((await logsOf({ kind: 'request' })).length, 0);
 
@@ -473,10 +487,10 @@ test('走了代理的请求进入统计：总量、成功率、耗时、按规�
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
   await applyProxy();
 
-  await stub.emit('onBeforeRequest', { requestId: 'm-1', url: IMG[0] });
-  await stub.emit('onCompleted', { requestId: 'm-1', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
-  await stub.emit('onBeforeRequest', { requestId: 'm-2', url: IMG[0] });
-  await stub.emit('onCompleted', { requestId: 'm-2', url: IMG[0], statusCode: 503, ip: '203.0.113.7' });
+  await stub.emit('onBeforeRequest', { requestId: 'm-1', url: IMG_URL });
+  await stub.emit('onCompleted', { requestId: 'm-1', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onBeforeRequest', { requestId: 'm-2', url: IMG_URL });
+  await stub.emit('onCompleted', { requestId: 'm-2', url: IMG_URL, statusCode: 503, ip: '203.0.113.7' });
 
   const { metrics } = await handleMessage({ type: 'getState' });
   assert.equal(metrics.requests.total, 2);
@@ -490,7 +504,7 @@ test('走了代理的请求进入统计：总量、成功率、耗时、按规�
 test('不命中规则的请求不进统计', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
   await stub.emit('onCompleted', {
-    requestId: 'm-3', url: 'https://cdn.manga.com/app.js', statusCode: 200, ip: '1.1.1.1',
+    requestId: 'm-3', url: 'https://cdn.unrelated.com/app.js', statusCode: 200, ip: '1.1.1.1',
   });
   const { metrics } = await handleMessage({ type: 'getState' });
   assert.equal(metrics.requests.total, 0, '直连的请求不属于「分流统计」');
@@ -498,7 +512,7 @@ test('不命中规则的请求不进统计', async () => {
 
 test('连接层失败也计入总量，成功率不虚高', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
-  await stub.emit('onErrorOccurred', { requestId: 'm-4', url: IMG[0], error: 'net::ERR_FAILED' });
+  await stub.emit('onErrorOccurred', { requestId: 'm-4', url: IMG_URL, error: 'net::ERR_FAILED' });
 
   const { metrics } = await handleMessage({ type: 'getState' });
   assert.equal(metrics.requests.total, 1);
@@ -509,7 +523,7 @@ test('连接层失败也计入总量，成功率不虚高', async () => {
 test('归因不到节点的请求单独计数，不硬塞给某个节点', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
   // 出口 IP 不属于任何已知节点：代理没转发、或出口地址还没测出来
-  await stub.emit('onCompleted', { requestId: 'm-5', url: IMG[0], statusCode: 200, ip: '198.51.100.200' });
+  await stub.emit('onCompleted', { requestId: 'm-5', url: IMG_URL, statusCode: 200, ip: '198.51.100.200' });
 
   const { metrics } = await handleMessage({ type: 'getState' });
   assert.equal(metrics.requests.total, 1);
@@ -526,7 +540,7 @@ test('出口 IP 已知时归因到具体节点', async () => {
       },
     })],
   });
-  await stub.emit('onCompleted', { requestId: 'm-6', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onCompleted', { requestId: 'm-6', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
 
   const { metrics } = await handleMessage({ type: 'getState' });
   const row = metrics.nodes.rows.find((r) => r.id === 'n_aaaaaaa1');
@@ -572,7 +586,7 @@ test('注入成功后清掉上一次的失败原因，界面不挂过期错误',
 
 test('统计落盘到 storage.local，跨浏览器重启保留', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
-  await stub.emit('onCompleted', { requestId: 'm-7', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onCompleted', { requestId: 'm-7', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
   await flushMetrics();
 
   const stored = stub.local._dump()[METRICS_KEY];
@@ -582,7 +596,7 @@ test('统计落盘到 storage.local，跨浏览器重启保留', async () => {
 
 test('统计体积不随时间增长：删掉的节点并入 retired 而不是留下孤儿键', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1'), nodeFixture('n_aaaaaaa2')] });
-  await stub.emit('onCompleted', { requestId: 'm-8', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onCompleted', { requestId: 'm-8', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
   await handleMessage({ type: 'deleteNode', id: 'n_aaaaaaa1' });
   await handleMessage({ type: 'deleteNode', id: 'n_aaaaaaa2' });
   await flushMetrics();
@@ -594,7 +608,7 @@ test('统计体积不随时间增长：删掉的节点并入 retired 而不是�
 
 test('清空日志不动统计，清零统计不动日志 —— 两件事各自独立', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
-  await stub.emit('onCompleted', { requestId: 'm-9', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onCompleted', { requestId: 'm-9', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
   assert.equal((await logsOf({ kind: 'request' })).length, 1);
 
   await handleMessage({ type: 'clearLogs' });
@@ -610,7 +624,7 @@ test('清空日志不动统计，清零统计不动日志 —— 两件事各自
 
 test('getLogs 的轻量轮询也带上统计，弹窗不用再发第二条消息', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
-  await stub.emit('onCompleted', { requestId: 'm-11', url: IMG[0], statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onCompleted', { requestId: 'm-11', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
 
   const result = await handleMessage({ type: 'getLogs', limit: 10 });
   assert.equal(result.metrics.requests.total, 1);
@@ -659,5 +673,200 @@ test('规则的非 ASCII 提示随 getState 一起下发', async () => {
   });
   const result = await handleMessage({ type: 'getState' });
   assert.match(result.ruleWarnings.r_bbbbbbb1[0], /Punycode/);
+});
+
+// ------------------------------------------- HTTPS 下路径不可见（决策 D16）
+//
+// 这一组是本项目最贵的回归测试。浏览器交给 PAC 的 https URL 已被剥掉 path 与 query，
+// 所以「命中规则」和「真的走代理」是两件事。1.2.0 把它们当成一件事，于是统计报告
+// 277 次「走代理的请求」，而代理服务商后台一条连接都没有。
+
+test('规则命中但 HTTPS 下判定不了：记入 blind，不算进 routed，也不给规则记命中', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')], rules: [BLIND_RULE] });
+  await applyProxy();
+
+  await stub.emit('onBeforeRequest', { requestId: 'b-1', url: IMG_URL });
+  await stub.emit('onCompleted', { requestId: 'b-1', url: IMG_URL, statusCode: 200, ip: '203.0.113.9' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 1, '仍要计入总量 —— 用户确实想代理它');
+  assert.equal(metrics.requests.blind, 1);
+  assert.equal(metrics.requests.routed, 0, '一次都没真的走代理');
+  assert.equal(metrics.requests.unattributed, 0, '原因已经确切知道，不该再混进「认不出节点」');
+  assert.equal(metrics.rules.rows.find((r) => r.id === BLIND_RULE.id).hits, 0,
+    '这条规则没有路由任何东西，不能显示成在干活');
+});
+
+test('blind 请求在日志里说清原因，且同一条规则只说一次', async () => {
+  // 用另一条规则 id：「每条规则只提示一次」的记录活在模块作用域里，
+  // 上一个用例已经把 BLIND_RULE 的那一次用掉了 —— 这本身就是被测行为
+  const other = { ...BLIND_RULE, id: 'r_bbbbbbb3', name: '扩展名二' };
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')], rules: [other] });
+  for (let i = 0; i < 5; i++) {
+    await stub.emit('onCompleted', { requestId: `b-${i}`, url: IMG_URL, statusCode: 200, ip: '203.0.113.9' });
+  }
+  const rows = (await logsOf({ kind: 'config' })).filter((r) => /剥掉路径/.test(r.message));
+  assert.equal(rows.length, 1, `同一条规则不该刷屏，实际 ${rows.length} 条`);
+  assert.match(rows[0].message, /https:\/\/cdn\.manga\.com\//, '要把浏览器实际交出去的 URL 写出来');
+});
+
+test('域名规则不会被误判成 blind', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', { requestId: 'b-9', url: IMG_URL, statusCode: 200, ip: '203.0.113.9' });
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.blind, 0);
+  assert.equal(metrics.requests.routed, 1);
+});
+
+// ------------------------------------------- 测速定向（决策 D3 的实现方式已改）
+
+test('测速期间注入的 PAC 真的把测速地址定向到目标节点', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1'), nodeFixture('n_aaaaaaa2')] });
+  let pacDuringProbe = null;
+  stub.setFetch(async () => {
+    pacDuringProbe = stub.lastPac(); // 捕获发请求那一刻真正生效的脚本
+    return { ok: true, status: 204 };
+  });
+
+  await probeNode('n_aaaaaaa2');
+
+  assert.ok(pacDuringProbe, '测速前必须先注入定向 PAC');
+  const probeUrl = stub.fetchCalls[0];
+  const decision = loadPac(pacDuringProbe).find(...browserUrl(probeUrl));
+  assert.equal(decision, 'PROXY aaaaaaa2.px:8080',
+    '测速必须精确命中目标节点且无兜底，否则测出来的是直连的延迟');
+});
+
+test('测速结束后恢复正常 PAC，测速地址不再被钉在某个节点上', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1'), nodeFixture('n_aaaaaaa2')] });
+  await probeAll();
+
+  const after = loadPac(stub.lastPac());
+  const probeOrigin = browserUrl((await getConfig()).settings.probe.url);
+  assert.equal(after.find(...probeOrigin), 'DIRECT', '定向必须只在测速那一刻存在');
+  assert.match(after.find(...IMG), /^PROXY /, '正常分流要恢复');
+});
+
+test('无法定向时测速判失败，绝不报告一个直连的延迟', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  stub.setControl('controlled_by_other_extensions');
+
+  const result = await probeNode('n_aaaaaaa1');
+
+  assert.equal(result.ok, false, '控制权不在手上时，请求根本不会走那个节点');
+  assert.match(result.error, /控制权/);
+  assert.equal(stub.fetchCalls.length, 0, '连请求都不该发出去');
+  assert.equal((await getConfig()).nodes[0].health.status, 'fail');
+});
+
+test('测速地址非法时测速判失败而不是静默直连', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await handleMessage({
+    type: 'saveConfig',
+    config: { ...(await getConfig()), settings: { ...(await getConfig()).settings, probe: { ...(await getConfig()).settings.probe, url: 'https://ok.test/204' } } },
+  });
+  // schema 会把非法 URL 修回默认值，所以这里直接改缓存来模拟「拿不到源」的情形
+  const config = await getConfig();
+  config.settings.probe.url = 'not a url';
+
+  const result = await probeNode('n_aaaaaaa1');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /无法把测速请求定向/);
+  assert.equal(stub.fetchCalls.length, 0);
+});
+
+
+
+// ------------------------------- 归因：多个节点共用同一地址（决策 D18）
+//
+// 真实用户的常见形态：一台代理机开 19 个端口，19 个节点的 host 全是 10.0.0.3。
+// webRequest 只给出对端 IP，没有对端端口，所以「哪个节点在干活」这个问题在这种
+// 配置下根本无法回答。旧的 findNodeByIp 用 `n.host === ip` 取第一个匹配，于是把
+// 全部用量记到了列表里第一个节点上 —— 面板显示「1 个节点 100%、其余 18 个 0%」，
+// 看起来像「轮询坏了」，其实是归因在编数字。
+
+test('多个节点共用同一地址时不硬猜，记入无法归因而不是全塞给第一个', async () => {
+  await seed({
+    nodes: [
+      nodeFixture('n_aaaaaaa1', { host: '10.0.0.3', port: 24000 }),
+      nodeFixture('n_aaaaaaa2', { host: '10.0.0.3', port: 24001 }),
+      nodeFixture('n_aaaaaaa3', { host: '10.0.0.3', port: 24002 }),
+    ],
+  });
+  for (let i = 0; i < 6; i++) {
+    await stub.emit('onBeforeRequest', { requestId: `s-${i}`, url: IMG_URL });
+    await stub.emit('onCompleted', { requestId: `s-${i}`, url: IMG_URL, statusCode: 200, ip: '10.0.0.3' });
+  }
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.routed, 6);
+  assert.equal(metrics.requests.unattributed, 6, '端口分不出来，就不该假装知道是哪个节点');
+  for (const row of metrics.nodes.rows) {
+    assert.equal(row.used, 0, `${row.id} 不该被凭空记上用量`);
+  }
+  // 但「对端 IP 确实属于你的节点」是能确定的，这才是「真的走了代理」的硬证据
+  assert.equal(metrics.requests.viaNodeIp, 6);
+});
+
+test('地址唯一的节点照旧能精确归因', async () => {
+  await seed({
+    nodes: [
+      nodeFixture('n_aaaaaaa1', { host: '10.0.0.3', port: 24000 }),
+      nodeFixture('n_aaaaaaa2', { host: '10.0.0.4', port: 24001 }),
+    ],
+  });
+  await stub.emit('onCompleted', { requestId: 's-x', url: IMG_URL, statusCode: 200, ip: '10.0.0.4' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.nodes.rows.find((r) => r.id === 'n_aaaaaaa2').used, 1);
+  assert.equal(metrics.requests.unattributed, 0);
+  assert.equal(metrics.requests.viaNodeIp, 1);
+});
+
+test('对端 IP 不属于任何节点时既不归因也不算作「经代理返回」', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1', { host: '10.0.0.3', port: 24000 })] });
+  await stub.emit('onCompleted', { requestId: 's-y', url: IMG_URL, statusCode: 200, ip: '198.51.100.9' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.unattributed, 1);
+  assert.equal(metrics.requests.viaNodeIp, 0, '这次请求没有证据表明它经过了你的代理');
+});
+
+test('共用地址的节点数会在日志里说明，而不是给出一个假的节点名', async () => {
+  await seed({
+    nodes: [
+      nodeFixture('n_aaaaaaa1', { host: '10.0.0.3', port: 24000 }),
+      nodeFixture('n_aaaaaaa2', { host: '10.0.0.3', port: 24001 }),
+    ],
+  });
+  await stub.emit('onCompleted', { requestId: 's-z', url: IMG_URL, statusCode: 200, ip: '10.0.0.3' });
+  const text = textOf(await logsOf({ kind: 'request' }));
+  assert.match(text, /10\.0\.0\.3/);
+  assert.match(text, /共用|分不出|无法区分/, `应说明为什么归不到具体节点：${text}`);
+});
+
+// ------------------------------- 测速的并发保护
+//
+// 测速改成串行定向之后，一份 PAC 只能指向一个节点。两轮测速重叠时，A 轮注入的定向会
+// 被 B 轮覆盖，于是「测节点 A 的请求」实际走了节点 B —— 又是一个会安静给出错数字的路径。
+
+test('已有测速在进行时，再次触发会被明确拒绝而不是并发跑', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1'), nodeFixture('n_aaaaaaa2')] });
+  // 让每次测速请求慢一拍，好让第二次调用落在第一轮还没结束的时候
+  stub.setFetch(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return { ok: true, status: 204 };
+  });
+
+  const first = probeAll();
+  await Promise.resolve(); // 让第一轮真的开始
+
+  assert.deepEqual(await probeAll(), [], '第二轮不该并发跑');
+  const single = await probeNode('n_aaaaaaa1');
+  assert.equal(single.ok, false, '单节点测速同样要被挡住');
+  assert.match(single.error, /正在测速/);
+  assert.match(textOf(await logsOf({ kind: 'probe' })), /正在测速/);
+
+  assert.equal((await first).length, 2, '第一轮照常跑完');
 });
 

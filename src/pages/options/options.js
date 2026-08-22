@@ -15,7 +15,9 @@ import {
   downloadText, copyText, fileStamp,
 } from '../shared/api.js';
 import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar, kvRow } from '../shared/ui.js';
-import { matchUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
+import { matchUrl, matchPacUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
+import { pacUrl, isSanitizedScheme } from '../../lib/pac-url.js';
+
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { selectablePool } from '../../lib/scheduler.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
@@ -187,14 +189,54 @@ function renderRequestKpis() {
     }),
     kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms', hint: '只统计真的测到耗时的请求' }),
     kpi({
+      label: '真的走了代理',
+      value: req.routed,
+      unit: '次',
+      tone: req.total > 0 && req.routed === 0 ? 'err' : 'ok',
+      hint: '浏览器交给分流脚本的信息足够判定、且命中了规则的次数',
+    }),
+    kpi({
+      label: '对端确认是代理',
+      value: req.viaNodeIp,
+      unit: '次',
+      tone: req.routed > 0 && req.viaNodeIp === 0 ? 'warn' : 'ok',
+      hint: '响应来自你某个节点的地址 —— 这是「真的从代理回来了」的硬证据。'
+        + '即使多个节点共用地址、分不出是哪一个，这个数字照样成立',
+    }),
+    kpi({
+      label: '规则命中但直连',
+      value: req.blind,
+      unit: '次',
+      tone: req.blind > 0 ? 'err' : '',
+      hint: 'HTTPS 请求只把「协议+域名+端口」交给分流脚本，路径和查询串会被剥掉。'
+        + '这个数字不为零就说明有规则依赖了路径，永远不会生效 —— 改用「域名」类型',
+    }),
+    kpi({
       label: '无法归因',
       value: req.unattributed,
       unit: '次',
       tone: req.unattributed > 0 ? 'warn' : '',
-      hint: '认不出走的是哪个节点。先测速可减少；数字很大则多半是在走直连兜底',
+      hint: '走了代理但认不出是哪个节点。多个节点共用同一个地址（只有端口不同）时必然如此 ——'
+        + '对端信息里只有 IP、没有端口',
     }),
   );
 }
+
+/**
+ * 有多少组节点共用同一个地址。
+ * 共用地址的节点在「节点使用分布」里天然无法区分，必须说清楚，
+ * 否则那张表看起来就像「只有一个节点在干活、其余全挂了」。
+ */
+function sharedHostGroups() {
+  const byHost = new Map();
+  for (const node of config.nodes) {
+    if (!isSelectable(node)) continue;
+    byHost.set(node.host, (byHost.get(node.host) ?? 0) + 1);
+  }
+  return [...byHost.entries()].filter(([, count]) => count > 1);
+}
+
+
 
 function renderNodeUsage() {
   const body = $('nodeUsageBody');
@@ -203,6 +245,19 @@ function renderNodeUsage() {
   const empty = rows.length === 0;
   $('nodeUsageEmpty').hidden = !empty;
   $('nodeUsageTable').hidden = empty;
+
+  // 共用地址的节点在这张表里注定分不开，得先把话说明白 ——
+  // 否则「1 个节点 100%、其余 18 个 0%」看起来就像轮询坏了
+  const shared = sharedHostGroups();
+  const note = $('nodeUsageShared');
+  note.hidden = shared.length === 0;
+  if (shared.length > 0) {
+    const detail = shared.map(([host, count]) => `${host}（${count} 个）`).join('、');
+    note.textContent = `注意：${detail} 上的节点共用同一个地址，只有端口不同。`
+      + '浏览器只告诉扩展对端的 IP、不给端口，所以这些节点在本表里无法区分，'
+      + `它们的请求全部计入上面的「无法归因」。想确认轮询是否均匀，请看代理服务商后台的分端口流量。`;
+  }
+
   if (empty) return;
 
   for (const row of rows) {
@@ -697,10 +752,14 @@ $('btnSaveRule').addEventListener('click', async () => {
 $('btnResetRuleForm').addEventListener('click', resetRuleForm);
 
 $('btnAddPresets').addEventListener('click', async () => {
+  // 预设**必须**是「只靠协议+域名+端口就能判定」的形态：HTTPS 请求交给分流脚本时
+  // 路径与查询串已被浏览器剥掉（见 lib/pac-url.js）。1.2.0 及以前这里放的是
+  // `\.(jpe?g|png|webp)$` 之类依赖扩展名的正则，README 还教用户优先启用它 ——
+  // 结果那条规则对 HTTPS 图片永远命中不了，扩展看起来装了却一个请求都没代理出去。
   const presets = [
-    { name: '常见图片扩展名', type: 'regex', pattern: '\\.(jpe?g|png|webp|gif|avif|bmp)(\\?.*)?$' },
-    { name: '图片 CDN 子域', type: 'regex', pattern: '^https?://(img|image|images|pic|photo|cdn)\\d*\\.' },
-    { name: '带 image 路径的请求', type: 'regex', pattern: '^https?://[^/]+/.*/(images?|pics?|comic|manga)/' },
+    { name: '图片 CDN 子域', type: 'regex', pattern: '^https?://(img|image|images|pic|pics|photo|cdn|static|media|res)\\d*\\.' },
+    { name: '图片域名（把 example.com 换成你的图源）', type: 'host', pattern: 'example.com' },
+    { name: '常见图片扩展名（仅 http 图源有效）', type: 'regex', pattern: '^http://[^/]+/.*\\.(jpe?g|png|webp|gif|avif|bmp)(\\?.*)?$' },
   ];
   await guard(async () => {
     for (const preset of presets) {
@@ -708,7 +767,8 @@ $('btnAddPresets').addEventListener('click', async () => {
       await send('saveRule', { rule: { ...preset, enabled: false, nodeIds: [] } });
     }
     await refresh();
-    setBanner($('ruleError'), '已插入 3 条预设规则（默认关闭，请确认后逐条启用）', 'ok');
+    setBanner($('ruleError'), '已插入 3 条预设规则（默认关闭，请确认后逐条启用）。'
+      + '优先用「域名」类型：HTTPS 请求只把协议+域名+端口交给分流脚本，依赖路径或扩展名的规则对 HTTPS 不生效。', 'ok');
   }, 'ruleError');
 });
 
@@ -720,23 +780,45 @@ $('btnTestRule').addEventListener('click', () => {
     return;
   }
 
-  const rule = matchUrl(url, config.rules);
+  // 两次判定：浏览器实际交给分流脚本的 URL（权威），以及完整 URL（用户的意图）。
+  // 只报后者是 1.2.0 那份规则测试器的问题 —— 它说「命中」，浏览器里却是直连。
+  const seen = pacUrl(url);
+  const stripped = isSanitizedScheme(url) && seen !== url;
+  const seenNote = stripped
+    ? `浏览器只会把 ${seen} 交给分流脚本（HTTPS 的路径与查询串被剥掉）。`
+    : '';
+
+  const rule = matchPacUrl(url, config.rules);
   if (!rule) {
-    setBanner(box, '未命中任何启用的规则 → 该请求会直连，不走代理。', 'info');
+    const intended = matchUrl(url, config.rules);
+    if (intended) {
+      setBanner(box, `${seenNote}规则「${intended.name}」（${RULE_TYPE_LABELS[intended.type]}）在完整 URL 上命中，`
+        + '但分流脚本判定不了 → 这个请求实际会**直连**。请把它改成「域名」类型，'
+        + '或让规则只约束域名部分。', 'err');
+      return;
+    }
+    setBanner(box, `${seenNote}未命中任何启用的规则 → 该请求会直连，不走代理。`, 'info');
     return;
   }
 
+  const scope = compileRule(rule).scope;
+  const widened = stripped && scope
+    ? `注意：HTTPS 下这条规则实际按「${scope.pat}」整段生效，范围比你写的更宽。`
+    : '';
+
   const pool = selectablePool(config.nodes, compileRule(rule).nodeIds);
   if (pool.length === 0) {
-    setBanner(box, `命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}），`
-      + '但当前没有可用的 HTTP/HTTPS 节点 → 会按兜底策略处理。', 'warn');
+    setBanner(box, `${seenNote}命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}），`
+      + `但当前没有可用的 HTTP/HTTPS 节点 → 会按兜底策略处理。${widened}`, 'warn');
     return;
   }
   setBanner(box,
-    `命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}）→ 将在这 ${pool.length} 个节点间轮询：`
-    + pool.map((n) => `${n.name}（${protocolLabel(n.protocol)}·${statusLabel(n)}）`).join('、'),
+    `${seenNote}命中规则「${rule.name}」（${RULE_TYPE_LABELS[rule.type]}）→ 将在这 ${pool.length} 个节点间轮询：`
+    + pool.map((n) => `${n.name}（${protocolLabel(n.protocol)}·${statusLabel(n)}）`).join('、')
+    + (widened ? ` ${widened}` : ''),
     'ok');
 });
+
 
 for (const id of ['strategy', 'fallback', 'rotateEvery', 'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
