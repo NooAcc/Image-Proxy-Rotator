@@ -32,11 +32,32 @@
   const MAX_TRACKED = 800;
   /** 后台回「扩展已关闭」之后，多久之内不再问 */
   const DISABLED_COOLDOWN_MS = 30000;
+  /**
+   * 重发之后等多久还没有 load / error，就认定这次重发**不会再有结论**。
+   *
+   * 元素被页面换掉、或者整页导航走之后，渲染进程不会在它上面派发任何事件 —— 于是
+   * 「重发出去了，然后呢」这个问题永远不会有人回答，后台的 `attempted` 永久悬空。
+   * 真实数据里 attempted=7 / recovered=6，差的那 1 次正是如此：网络层 10 秒后报了
+   * `ERR_ABORTED`，而 img 上什么都没派发。
+   *
+   * 取 25 秒是因为观测到的真实首次请求最慢 18.2 秒 —— 阈值必须明显大于它，
+   * 否则会把「只是很慢」误判成「没有结论」。
+   */
+  const RETRY_OUTCOME_TIMEOUT_MS = 25000;
 
   /** 原图 URL -> 已经尝试过几次（含首次） */
   const attempts = new Map();
-  /** 正在等我们处理的元素 -> {mode, url}。用 WeakMap，元素被移除即自动释放 */
+  /** 正在等我们处理的元素 -> state。用 WeakMap，元素被移除即自动释放 */
   const watching = new WeakMap();
+  /**
+   * 还没有结论的重发（state 对象本身）。
+   *
+   * WeakMap 查得快但遍历不了，而页面被切到后台时必须能把悬空的那些**一次结清** ——
+   * 导航走正是这类悬空最常见的成因，等满超时往往等不到，页面已经卸载了。
+   * 强引用是刻意的，但有界：每个 state 最多存活 RETRY_OUTCOME_TIMEOUT_MS，
+   * 而同一窗口内的重发次数本来就受 PAGE_BUDGET 约束。
+   */
+  const outstanding = new Set();
   /** 已经问过一次、正在等回复的元素，防止同一张图并发重入 */
   const asking = new WeakSet();
 
@@ -137,13 +158,16 @@
   }
 
   try {
-    // 收尾 flush 挂 visibilitychange 而不是 beforeunload —— 后者在 MV3 里不可靠，
-    // 而没有收尾的话，导航走了最后不足一批的那几行就永久丢了
+    // 收尾挂 visibilitychange 而不是 beforeunload —— 后者在 MV3 里不可靠。
+    // 两件事都得做：把悬空的重发结清（导航走之后它们永远不会有结论了），
+    // 再把最后不足一批的调试行发回去（不发就永久丢了）
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') debugFlush();
+      if (document.visibilityState !== 'hidden') return;
+      for (const state of [...outstanding]) settle(state, null);
+      debugFlush();
     });
   } catch {
-    // 没有这个事件也只是少一次收尾，定时器照样会发
+    // 没有这个事件也只是少一次收尾：超时那条路照样会给出结论，定时器照样会发
   }
 
   // ---------------------------------------------------------------- 重新加载
@@ -197,18 +221,39 @@
   }
 
   function watch(img, mode, url) {
-    watching.set(img, { mode, url });
+    const state = { img, mode, url, timer: 0 };
+    // 超时是这条链路唯一的兜底：load 与 error 都不来的时候，只有它能给出结论
+    state.timer = setTimeout(() => settle(state, null), RETRY_OUTCOME_TIMEOUT_MS);
+    watching.set(img, state);
+    outstanding.add(state);
     img.addEventListener('load', onLoaded, { once: true });
   }
 
+  /**
+   * 给一次重发下结论并回报，**只下一次**。
+   *
+   * load、error、超时、页面隐藏是四条会撞车的路径（比如超时刚触发、load 紧接着到），
+   * 而同一次重发报两个结论会让后台的 recovered / abandoned 一起变成假数字。
+   * `outstanding.delete()` 的返回值就是这道闸门。
+   *
+   * @param {boolean|null} ok true = 收到 load，false = 又失败了，null = 不会有结论了
+   */
+  function settle(state, ok) {
+    if (!outstanding.delete(state)) return;
+    clearTimeout(state.timer);
+    // 按身份删而不是按元素删：同一个 <img> 可能已经挂上了**新一轮**重发的 state，
+    // 那时无条件 delete(img) 会把新一轮的跟踪一起抹掉
+    if (watching.get(state.img) === state) watching.delete(state.img);
+
+    if (ok === true) attempts.delete(state.url);
+    dbg(ok === true ? 'loaded' : (ok === false ? 'retry-failed' : 'abandoned'),
+      { url: state.url, mode: state.mode });
+    report(state.url, state.mode, ok);
+  }
+
   function onLoaded(event) {
-    const img = event.currentTarget;
-    const state = watching.get(img);
-    if (!state) return;
-    watching.delete(img);
-    attempts.delete(state.url);
-    dbg('loaded', { url: state.url, mode: state.mode });
-    report(state.url, state.mode, true);
+    const state = watching.get(event.currentTarget);
+    if (state) settle(state, true);
   }
 
   // ---------------------------------------------------------------- 失败入口
@@ -225,9 +270,7 @@
     // 上一轮是我们发起的：先把结果如实回报，再决定要不要继续
     const previous = watching.get(img);
     if (previous) {
-      watching.delete(img);
-      dbg('retry-failed', { url: previous.url, mode: previous.mode });
-      report(previous.url, previous.mode, false);
+      settle(previous, false);
       // 兜底也失败了就到此为止 —— 再问下去只会套娃
       if (previous.mode === 'fallback') return;
     }

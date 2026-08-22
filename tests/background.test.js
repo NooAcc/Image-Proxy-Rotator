@@ -518,6 +518,8 @@ test('连接层失败也计入总量，成功率不虚高', async () => {
   assert.equal(metrics.requests.total, 1);
   assert.equal(metrics.requests.fail, 1);
   assert.equal(metrics.requests.successRate, 0);
+  assert.equal(metrics.requests.unattributed, 0,
+    '连接都没建起来就没有对端 IP —— 那不叫归因失败，叫压根没得归因');
 });
 
 test('归因不到节点的请求单独计数，不硬塞给某个节点', async () => {
@@ -870,3 +872,82 @@ test('已有测速在进行时，再次触发会被明确拒绝而不是并发�
   assert.equal((await first).length, 2, '第一轮照常跑完');
 });
 
+
+// ------------------------------- 缓存命中
+//
+// 真实数据（logs/debug，2026-08-23）：481 条 request 事件只有 236 个不同 URL，重复
+// 出现的 241 条中位数 3ms —— 那是磁盘缓存。旧实现从不读 details.fromCache，于是
+// 「走了代理」虚高约一倍，而「平均耗时」变成 2ms 缓存与 16s 真实请求的混合物。
+// 更隐蔽的是：缓存命中时浏览器**照样**给出上一次的对端 IP，所以它连
+// 「对端确认是代理」都能骗过去。
+
+test('缓存命中单列一格，不进总量、耗时与「对端确认是代理」', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1', { host: '203.0.113.7', port: 24000 })] });
+
+  await stub.emit('onBeforeRequest', { requestId: 'c-1', url: IMG_URL });
+  await stub.emit('onCompleted', {
+    requestId: 'c-1', url: IMG_URL, statusCode: 200, ip: '203.0.113.7', fromCache: true,
+  });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.cached, 1);
+  assert.equal(metrics.requests.total, 0, '一个字节都没出去，不该算一次代理请求');
+  assert.equal(metrics.requests.viaNodeIp, 0, '缓存给的是上一次的对端 IP，不是新证据');
+  assert.equal(metrics.requests.avgLatencyMs, null);
+  assert.equal(metrics.nodes.rows[0].used, 0, '不该记到节点用量上');
+});
+
+test('缓存命中不算规则在干活', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', {
+    requestId: 'c-2', url: IMG_URL, statusCode: 200, ip: '203.0.113.7', fromCache: true,
+  });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.rules.rows.find((r) => r.id === RULE.id).hits, 0,
+    '路由这次请求的是缓存，不是规则');
+});
+
+test('缓存命中在活动日志里说明为什么它很快', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', {
+    requestId: 'c-3', url: IMG_URL, statusCode: 200, ip: '203.0.113.7', fromCache: true,
+  });
+  assert.match(textOf(await logsOf({ kind: 'request' })), /缓存/);
+});
+
+test('同一个 URL 首次走网络、之后命中缓存，两者分开计数', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1', { host: '203.0.113.7', port: 24000 })] });
+
+  await stub.emit('onBeforeRequest', { requestId: 'c-4', url: IMG_URL });
+  await stub.emit('onCompleted', { requestId: 'c-4', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
+  for (let i = 0; i < 5; i++) {
+    await stub.emit('onBeforeRequest', { requestId: `c-5-${i}`, url: IMG_URL });
+    await stub.emit('onCompleted', {
+      requestId: `c-5-${i}`, url: IMG_URL, statusCode: 200, ip: '203.0.113.7', fromCache: true,
+    });
+  }
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 1, '翻回去重看五遍不该让「走了代理」变成 6');
+  assert.equal(metrics.requests.cached, 5);
+  assert.equal(metrics.nodes.rows[0].used, 1);
+});
+
+// ------------------------------- 延迟分位数
+
+test('分位数与平均值一起给出 —— 平均值对长尾没有抵抗力', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+
+  // 九快一慢：平均值会被那一次 12 秒拉高，但 p50 应当仍然很小
+  for (let i = 0; i < 9; i++) {
+    await stub.emit('onBeforeRequest', { requestId: `p-${i}`, url: IMG_URL });
+    await stub.emit('onCompleted', { requestId: `p-${i}`, url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
+  }
+  await stub.emit('onCompleted', { requestId: 'p-slow', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.ok(Number.isFinite(metrics.requests.latencyP50), 'p50 应当给出具体数值');
+  assert.ok(Number.isFinite(metrics.requests.latencyP90), 'p90 应当给出具体数值');
+  assert.ok(metrics.requests.latencyP90 >= metrics.requests.latencyP50, 'p90 不该小于 p50');
+});

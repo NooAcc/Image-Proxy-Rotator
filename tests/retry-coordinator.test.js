@@ -25,7 +25,7 @@ const { installRequestLogger, resetObservedFailures, observedFailure } = await i
 const { resetMetrics } = await import('../src/background/metrics-store.js');
 const { resetRetryThrottle } = await import('../src/background/retry-coordinator.js');
 const { normalizeConfig } = await import('../src/lib/schema.js');
-const { FAILURE_TTL_MS } = await import('../src/lib/constants.js');
+const { FAILURE_TTL_MS, RETRY_ASK_GRACE_MS } = await import('../src/lib/constants.js');
 
 assert.equal(installRequestLogger(), true, 'webRequest 监听器应注册成功');
 
@@ -59,6 +59,11 @@ async function seed(partial = {}) {
 
 const logText = async () => (await getLogger()).list({ kind: 'request' }).map((r) => r.message).join('\n');
 const view = async () => (await handleMessage({ type: 'getState' })).metrics;
+/** 推进假时钟，再把定时器回调里那串 async 让干净 */
+async function elapse(t, ms) {
+  t.mock.timers.tick(ms);
+  for (let i = 0; i < 8; i++) await new Promise((resolve) => setImmediate(resolve));
+}
 
 /** 走一遍「后台观测到失败 → 内容脚本来问」的完整往返 */
 async function askAfter(observed, { url = IMG_URL, attempt = 1 } = {}) {
@@ -326,4 +331,123 @@ test('不匹配规则的请求失败不进表 —— 没必要替整个网站记
   const other = 'https://cdn.other.com/x.jpg';
   await stub.emit('onErrorOccurred', { requestId: 'o-1', url: other, error: 'net::ERR_PROXY_CONNECTION_FAILED' });
   assert.equal(observedFailure(other), null);
+});
+
+// ---------------------------------------------------------------- 页面没捕获到的失败
+
+/*
+ * 真实数据（logs/debug，2026-08-23）暴露的缺口：13 次失败里只有 7 次到过内容脚本。
+ * 全部 7 次都是 t2.nhentai.net 的缩略图（DOM 里的真 <img>），而 i.nhentai.net 的
+ * 阅读器大图一次都没有 —— 阅读器用 new Image() 预加载，不在 DOM 上的 Image 不会
+ * 经过 document 的捕获阶段，内容脚本永远看不见。
+ *
+ * 旧实现里这类失败不产生任何计数，于是面板「未重试」显示 0，读起来像
+ * 「每次失败都重试了」。它必须有自己的格子。
+ */
+
+test('网络层失败后页面一直没来问，记一次「页面没捕获」', async (t) => {
+  await seed();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  await stub.emit('onBeforeRequest', { requestId: 'u-1', url: IMG_URL });
+  await stub.emit('onErrorOccurred', {
+    requestId: 'u-1', url: IMG_URL, error: 'net::ERR_CONNECTION_CLOSED',
+  });
+
+  assert.equal((await view()).retry.unseen, 0, '宽限期内不该下结论 —— 页面可能只是慢了几十毫秒');
+
+  await elapse(t, RETRY_ASK_GRACE_MS + 1);
+  assert.equal((await view()).retry.unseen, 1);
+  assert.equal((await view()).retry.skipped, 0, '这不是「判定为不重试」，是压根没被问过');
+});
+
+test('页面在宽限期内来问了，就不算没捕获', async (t) => {
+  await seed();
+  // 假时钟必须在**失败落地之前**接管：expectRetryAsk 的定时器是那一刻建的，
+  // 建在真时钟上的话 tick() 推不动它，这条用例就会假绿
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // askAfter 先发失败再问，所以 planRetry 当场查得到原因，不会走那 150ms 宽限
+  await askAfter({ error: 'net::ERR_CONNECTION_CLOSED' });
+
+  await elapse(t, RETRY_ASK_GRACE_MS + 1);
+  assert.equal((await view()).retry.unseen, 0);
+  assert.equal((await view()).retry.attempted, 1, '正常重试路径不受影响');
+});
+
+test('图源自己回 4xx 不算「页面没捕获」', async (t) => {
+  // 换个代理拿到的还是同一个 404，页面捕不捕获都无所谓 ——
+  // 把它算进来会让这一格变成与代理无关的噪音
+  await seed();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  await stub.emit('onBeforeRequest', { requestId: 'u-2', url: IMG_URL });
+  await stub.emit('onCompleted', { requestId: 'u-2', url: IMG_URL, statusCode: 404 });
+
+  await elapse(t, RETRY_ASK_GRACE_MS + 1);
+  assert.equal((await view()).retry.unseen, 0);
+});
+
+test('不归本扩展管的地址失败了，不记「页面没捕获」', async (t) => {
+  await seed();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const outside = 'https://cdn.unrelated.com/logo.png';
+  await stub.emit('onBeforeRequest', { requestId: 'u-3', url: outside });
+  await stub.emit('onErrorOccurred', {
+    requestId: 'u-3', url: outside, error: 'net::ERR_CONNECTION_CLOSED',
+  });
+
+  await elapse(t, RETRY_ASK_GRACE_MS + 1);
+  assert.equal((await view()).retry.unseen, 0, '用户随手逛的任何站点的裂图都会走到这里');
+});
+
+test('页面抢在网络层之前来问，也不算没捕获', async (t) => {
+  // 两条路径没有顺序保证 —— retry-coordinator 的 LOOKUP_GRACE_MS 就是为反向的
+  // 那一半准备的。页面先到时，后台此刻还没开始计时，撤销无从谈起；
+  // 等它开始计时了再判「没人来问」就是凭空造一个假数字
+  await seed();
+  await stub.emit('onBeforeRequest', { requestId: 'u-4', url: IMG_URL });
+
+  // 刻意让询问**完整走完**再让网络层落地 —— 这是最危险的那个顺序。
+  // 这一路查不到失败原因，会走 planRetry 那 150ms 宽限，所以假时钟只能在它之后接管
+  await handleMessage({ type: 'imageRetryAsk', url: IMG_URL, attempt: 1 });
+
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  await stub.emit('onErrorOccurred', {
+    requestId: 'u-4', url: IMG_URL, error: 'net::ERR_CONNECTION_CLOSED',
+  });
+
+  await elapse(t, RETRY_ASK_GRACE_MS + 1);
+  assert.equal((await view()).retry.unseen, 0, '页面明明问过了');
+});
+
+// ---------------------------------------------------------------- 重发之后没了下文
+
+/*
+ * 真实数据里 attempted=7 / recovered=6，差的那 1 次：内容脚本 resent 之后，
+ * 既没有 loaded 也没有 retry-failed，10 秒后网络层报了 ERR_ABORTED ——
+ * 元素被页面换掉或导航走了，渲染进程不会再派发任何事件。
+ * 内容脚本用超时兜住这种情况，回报一个「结果未知」。
+ */
+
+test('内容脚本回报「结果未知」时记 abandoned，不算救回也不算失败', async () => {
+  await seed();
+  await handleMessage({ type: 'imageRetryResult', url: IMG_URL, kind: 'retry', ok: null });
+
+  const m = await view();
+  assert.equal(m.retry.abandoned, 1);
+  assert.equal(m.retry.recovered, 0);
+  assert.equal(m.retry.exhausted, 0);
+});
+
+test('重发悬空的次数在面板上能看见', async () => {
+  await seed();
+  await askAfter({ error: 'net::ERR_CONNECTION_CLOSED' });
+  assert.equal((await view()).retry.pending, 1, '刚重发出去，还没有结论');
+
+  await handleMessage({ type: 'imageRetryResult', url: IMG_URL, kind: 'retry', ok: null });
+  const m = await view();
+  assert.equal(m.retry.pending, 0);
+  assert.equal(m.retry.abandoned, 1, '结论是「不会有结论了」，也是一种结论');
 });

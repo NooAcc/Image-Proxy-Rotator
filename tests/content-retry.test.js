@@ -93,10 +93,56 @@ function mount(respond, options = {}) {
   const docHandlers = {};
   let onError = null;
 
+  /**
+   * 假时钟。**必须接管** setTimeout：内容脚本为每次重发挂一个 25 秒的「没下文」超时，
+   * 用真定时器的话每个用例结束后都会把进程多挂 25 秒。
+   */
+  const timers = new Map();
+  let nextTimer = 1;
+  let now = 0;
+
+  /**
+   * `fail()` 之后自动推进的上限。
+   *
+   * 取 100ms 是刻意的：重发前的 delayMs（用例里是 0 或 1）要自动走完，
+   * 而调试日志的 1 秒攒批定时器与 25 秒超时**不能**被顺手触发 ——
+   * 那两条正是另外几个用例要单独验的东西。
+   */
+  const AUTO_ADVANCE_MS = 100;
+
+  const flush = async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  };
+
+  /** 跑掉此刻已到期的定时器 */
+  function fireDue() {
+    for (const [id, timer] of [...timers]) {
+      if (timer.at > now) continue;
+      timers.delete(id);
+      timer.fn();
+    }
+  }
+
+  /** 让短定时器自己走完，好让用例只 await 一次就看到最终状态 */
+  async function autoAdvance() {
+    for (let round = 0; round < 12; round++) {
+      await flush();
+      const soon = [...timers.values()].filter((t) => t.at - now <= AUTO_ADVANCE_MS);
+      if (soon.length === 0) break;
+      now = Math.min(...soon.map((t) => t.at));
+      fireDue();
+    }
+    await flush();
+  }
+
   const sandbox = {
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: (fn, ms) => {
+      const id = nextTimer++;
+      timers.set(id, { fn, at: now + (Number(ms) || 0) });
+      return id;
+    },
+    clearTimeout: (id) => timers.delete(id),
     URL,
     Date,
     document: {
@@ -137,8 +183,11 @@ function mount(respond, options = {}) {
 
   return {
     sent,
-    /** 触发一次资源加载失败并等它处理完 */
-    fail: (target) => onError({ target }),
+    /** 触发一次资源加载失败并等它处理完（含重发前的短等待） */
+    fail: (target) => {
+      const done = onError({ target });
+      return autoAdvance().then(() => done);
+    },
     asks: () => sent.filter((m) => m.type === 'imageRetryAsk'),
     results: () => sent.filter((m) => m.type === 'imageRetryResult'),
     debugRows: () => sent.filter((m) => m.type === 'debugPush').flatMap((m) => m.rows),
@@ -146,6 +195,12 @@ function mount(respond, options = {}) {
     hide: () => {
       sandbox.document.visibilityState = 'hidden';
       docHandlers.visibilitychange?.();
+    },
+    /** 明确推进假时钟，跑掉到期的定时器（验超时那几条用） */
+    tick: async (ms) => {
+      now += ms;
+      fireDue();
+      await flush();
     },
   };
 }
@@ -160,6 +215,15 @@ const PROXIED = 'https://wsrv.nl/?url=x';
  * 于是 deepStrictEqual 会以「结构相同但引用不等」为由失败。只比数据。
  */
 const plain = (value) => JSON.parse(JSON.stringify(value));
+
+/**
+ * 「重发多久没下文就认定不会有下文」的时长。
+ *
+ * 它只活在内容脚本里 —— 那是 classic script，import 不进来（见该文件头部说明），
+ * 所以这里从源码里取出来，两边永远不会各写一个数。
+ */
+const RETRY_OUTCOME_TIMEOUT_MS = Number(/RETRY_OUTCOME_TIMEOUT_MS = (\d+)/.exec(SOURCE)?.[1]);
+assert.ok(RETRY_OUTCOME_TIMEOUT_MS > 0, '内容脚本里必须定义 RETRY_OUTCOME_TIMEOUT_MS');
 
 // ---------------------------------------------------------------- 该不该出手
 
@@ -400,4 +464,88 @@ test('页面切后台时把攒着的那批发出去，不等定时器', async ()
   const before = page.debugRows().length;
   page.hide();
   assert.ok(page.debugRows().length > before, '切后台没 flush 的话，导航走了这批就没了');
+});
+
+// ---------------------------------------------------------------- 重发之后没了下文
+
+/*
+ * 真实数据（logs/debug，2026-08-23）里的悬空案例：内容脚本 resent 之后，既没有
+ * loaded 也没有 retry-failed，10 秒后网络层报了 ERR_ABORTED —— 元素被页面换掉或
+ * 导航走了，渲染进程不会再在它上面派发任何事件。
+ *
+ * 于是后台的 attempted 永久悬空：attempted=7 / recovered=6，差的那 1 次
+ * 在面板上无处可查。内容脚本必须自己兜住这种「不会再有结论」的情况。
+ */
+
+test('重发之后既没 load 也没 error，超时后回报「结果未知」', async () => {
+  const page = mount(alwaysRetry);
+  const el = img(IMG_URL);
+  await page.fail(el);
+  assert.equal(el.srcWrites.length, 1, '前提：确实重发了');
+
+  await page.tick(RETRY_OUTCOME_TIMEOUT_MS + 1);
+
+  assert.deepEqual(plain(page.results().at(-1)),
+    { type: 'imageRetryResult', url: IMG_URL, kind: 'retry', ok: null },
+    'ok 必须是 null —— 它既不是救回也不是失败，是「不会有结论了」');
+});
+
+test('超时之前不下结论 —— 真实请求最慢观测到 18 秒', async () => {
+  const page = mount(alwaysRetry);
+  await page.fail(img(IMG_URL));
+
+  await page.tick(RETRY_OUTCOME_TIMEOUT_MS - 1000);
+  assert.equal(page.results().length, 0, '只是慢，不是没了下文');
+});
+
+test('已经收到 load 就不再回报「结果未知」', async () => {
+  const page = mount(alwaysRetry);
+  const el = img(IMG_URL);
+  await page.fail(el);
+  el.fireLoad();
+
+  await page.tick(RETRY_OUTCOME_TIMEOUT_MS + 1);
+  const results = page.results();
+  assert.equal(results.length, 1, '一次重发只该有一个结论');
+  assert.equal(results[0].ok, true);
+});
+
+test('重发又失败之后不再补一条「结果未知」', async () => {
+  // 第二次 error 走 onResourceError 的「上一轮是我们发起的」分支，已经如实回报过
+  // 一次 false。超时若再补一条，同一次重发就有了两个结论，
+  // 后台的 recovered / abandoned 会一起变成假数字
+  let asked = 0;
+  const page = mount(() => (++asked === 1
+    ? { ok: true, action: 'retry', delayMs: 0 }
+    : { ok: true, action: 'give-up', reason: 'exhausted' }));
+  const el = img(IMG_URL);
+
+  await page.fail(el);
+  await page.fail(el);
+  assert.deepEqual(page.results().map((r) => r.ok), [false]);
+
+  await page.tick(RETRY_OUTCOME_TIMEOUT_MS + 1);
+  assert.deepEqual(page.results().map((r) => r.ok), [false], '超时不该再补一条');
+});
+
+test('页面切到后台时，悬空的重发立刻结算', async () => {
+  // 导航走是这类悬空最常见的成因。等满超时往往等不到 —— 页面已经卸载了
+  const page = mount(alwaysRetry);
+  await page.fail(img(IMG_URL));
+  assert.equal(page.results().length, 0);
+
+  page.hide();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+
+  assert.deepEqual(plain(page.results().at(-1)),
+    { type: 'imageRetryResult', url: IMG_URL, kind: 'retry', ok: null });
+});
+
+test('兜底那一路同样会兜住悬空', async () => {
+  const page = mount(() => ({ ok: true, action: 'fallback', url: PROXIED, delayMs: 0 }));
+  await page.fail(img(IMG_URL));
+
+  await page.tick(RETRY_OUTCOME_TIMEOUT_MS + 1);
+  assert.deepEqual(plain(page.results().at(-1)),
+    { type: 'imageRetryResult', url: PROXIED, kind: 'fallback', ok: null });
 });

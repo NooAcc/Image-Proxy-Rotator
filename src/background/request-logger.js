@@ -27,10 +27,10 @@
 import { matchUrl, matchPacUrl } from '../lib/rule-matcher.js';
 import { pacUrl } from '../lib/pac-url.js';
 import { getConfig, getLogger, queueRuntimeSave, updateConfig } from './state.js';
-import { noteRequestMetric } from './metrics-store.js';
+import { noteRequestMetric, noteRetryMetric } from './metrics-store.js';
 import { dbg } from './debug-store.js';
-import { PROBE_PARAM, FAILURE_TTL_MS } from '../lib/constants.js';
-import { classifyFailure } from '../lib/retry.js';
+import { PROBE_PARAM, FAILURE_TTL_MS, RETRY_ASK_GRACE_MS } from '../lib/constants.js';
+import { classifyFailure, isRetriableKind } from '../lib/retry.js';
 
 /** requestId -> {url, startedAt}，用于算耗时 */
 const pending = new Map();
@@ -55,15 +55,18 @@ const FAILURE_CAP = 300;
  */
 const blindWarned = new Set();
 
-/** 记下一次失败的原因。就地做过期清理与容量收口，不另开定时器 */
+/**
+ * 记下一次失败的原因。就地做过期清理与容量收口，不另开定时器。
+ * @returns {string} classifyFailure 的结论，供调用方决定还要不要做别的事
+ */
 function noteFailure(url, observed) {
   const kind = classifyFailure(observed);
-  if (kind === 'ok' || kind === 'unknown') return;
+  if (kind === 'ok' || kind === 'unknown') return kind;
 
   const now = Date.now();
   failures.set(String(url), { kind, at: now });
 
-  if (failures.size <= FAILURE_CAP) return;
+  if (failures.size <= FAILURE_CAP) return kind;
   // 先扫掉过期的；Map 保持插入顺序，所以不够的话继续从最旧的开始丢
   for (const [key, value] of failures) {
     if (now - value.at > FAILURE_TTL_MS) failures.delete(key);
@@ -72,6 +75,7 @@ function noteFailure(url, observed) {
     if (failures.size <= FAILURE_CAP) break;
     failures.delete(key);
   }
+  return kind;
 }
 
 /**
@@ -93,9 +97,79 @@ export function forgetFailure(url) {
   failures.delete(String(url));
 }
 
-/** 清空失败原因表。供测试拿到干净起点 —— 这张表活在模块作用域里，清存储清不掉它 */
+/**
+ * 「这次失败页面到底看没看见」的观测。
+ *
+ * URL -> 定时器 id。一个本该重试的失败落地后，如果宽限期内没人来问，就断定内容脚本
+ * 压根没捕获到 —— 只有 DOM 里的 `<img>` 会派发可捕获的 error，而阅读器常用
+ * `new Image()` 预加载，那种 Image 对象不在 DOM 上，`document` 的捕获阶段收不到。
+ *
+ * 不这么记的话，这类失败在面板上不产生任何痕迹：既不是「重试了」也不是「判定为不重试」，
+ * 于是「未重试」显示 0，读起来像「每次失败都重试了」。
+ */
+const awaitingAsk = new Map();
+const AWAITING_CAP = 300;
+
+/**
+ * URL -> 内容脚本最近一次问起的时刻。
+ *
+ * **这张表补的是一个反向竞态。** `onErrorOccurred` 与渲染进程在 `<img>` 上派发 error
+ * 是两条独立路径，没有顺序保证 —— retry-coordinator 的 `LOOKUP_GRACE_MS` 处理的是
+ * 「页面慢了几十毫秒」那一半，这里处理的是另一半：**页面先到**。那时后台还没开始计时，
+ * 撤销无从谈起，等失败落地再开始计时就会稳稳地数出一个不存在的「没人来问」。
+ */
+const askedAt = new Map();
+const ASKED_CAP = 300;
+
+/**
+ * 记下「这次失败在等页面来问」。只有**值得重试**的失败才进来 —— 图源回的 404
+ * 换个代理还是 404，页面捕不捕获都无所谓，算进来只会让那一格变成噪音。
+ */
+function expectRetryAsk(url, kind) {
+  if (!isRetriableKind(kind)) return;
+  const key = String(url);
+
+  // 页面已经就这个地址问过了（它比网络层先到），那就没什么可等的
+  const asked = askedAt.get(key);
+  if (asked !== undefined && Date.now() - asked < RETRY_ASK_GRACE_MS) return;
+
+  if (awaitingAsk.has(key)) return;
+  // 一个漫画页能同时打出几百个失败。上限之外的直接不记 ——
+  // 少数几笔计数不值得让这张表无界增长
+  if (awaitingAsk.size >= AWAITING_CAP) return;
+
+  const timer = setTimeout(() => {
+    awaitingAsk.delete(key);
+    void noteRetryMetric({ kind: 'unseen', at: Date.now() });
+  }, RETRY_ASK_GRACE_MS);
+  awaitingAsk.set(key, timer);
+}
+
+/**
+ * 内容脚本来问过这个 URL 了。
+ *
+ * 两件事都要做：撤销已经在跑的判定（页面后到），以及留一条时间戳给还没开始的判定
+ * （页面先到）。由 retry-coordinator 在 planRetry 入口调用。
+ */
+export function noteRetryAsked(url) {
+  const key = String(url);
+
+  const timer = awaitingAsk.get(key);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    awaitingAsk.delete(key);
+  }
+
+  if (askedAt.size >= ASKED_CAP) askedAt.clear();
+  askedAt.set(key, Date.now());
+}
+
+/** 清空失败原因表与「页面看没看见」的两张观测表。供测试拿到干净起点 —— 它们活在模块作用域里，清存储清不掉 */
 export function resetObservedFailures() {
   failures.clear();
+  for (const timer of awaitingAsk.values()) clearTimeout(timer);
+  awaitingAsk.clear();
+  askedAt.clear();
 }
 
 function shorten(url, max = 90) {
@@ -199,12 +273,19 @@ export function installRequestLogger() {
 
       const log = await getLogger();
       const ok = details.statusCode < 400;
-      const attributed = blind ? { node: null, shared: 0, viaNodeIp: false } : attribute(config.nodes, details.ip);
+      // 缓存命中不是一次代理往返 —— 而浏览器**照样**给出上一次的对端 IP，
+      // 于是它看起来像一次成功的代理请求。不区分的话，翻回去重看一页漫画
+      // 就能把「走了代理」的数字翻一倍（真实数据：481 条事件只有 236 个不同 URL）
+      const cached = details.fromCache === true;
+      const attributed = (blind || cached)
+        ? { node: null, shared: 0, viaNodeIp: false }
+        : attribute(config.nodes, details.ip);
       const latencyMs = record ? Date.now() - record.startedAt : null;
 
       // 状态码 ≥ 400 时留一条原因给重试判定 —— 它会据此拒绝重试，
       // 因为换个代理拿到的还是同一个 404
-      if (!ok) noteFailure(details.url, { statusCode: details.statusCode });
+      const failureKind = ok ? null : noteFailure(details.url, { statusCode: details.statusCode });
+      if (!ok && !blind && !cached) expectRetryAsk(details.url, failureKind);
 
       await noteRequestMetric({
         ok,
@@ -213,6 +294,8 @@ export function installRequestLogger() {
         viaNodeIp: attributed.viaNodeIp,
         ruleId: rule.id,
         blind,
+        cached,
+        responded: true,
         at: Date.now(),
       });
 
@@ -227,7 +310,9 @@ export function installRequestLogger() {
           type: details.type ?? null,
           status: details.statusCode,
           ip: details.ip ?? null,
-          routed: !blind,
+          // 缓存命中时 ip 仍然有值，光看日志会以为它走了代理。必须显式记一笔
+          fromCache: cached,
+          routed: !blind && !cached,
           blind,
           ruleId: rule.id,
           nodeId: attributed.node?.id ?? null,
@@ -245,7 +330,9 @@ export function installRequestLogger() {
         nodeId: attributed.node?.id ?? null,
         latencyMs,
         message: `${details.statusCode} ${shorten(details.url)}`
-          + (blind ? '（规则命中但 HTTPS 下判定不了，实际直连）' : describeAttribution(details.ip, attributed)),
+          + (blind ? '（规则命中但 HTTPS 下判定不了，实际直连）'
+            : cached ? '（浏览器缓存命中，没有走网络）'
+              : describeAttribution(details.ip, attributed)),
       });
       // 热路径：一个漫画页能打出几百个请求，落盘必须走节流
       queueRuntimeSave();
@@ -265,26 +352,30 @@ export function installRequestLogger() {
       if (!verdict) return;
 
       // 失败原因留给重试判定。这是它唯一能知道「是代理连不上，还是别的什么」的来源
-      noteFailure(details.url, { error: details.error });
+      const failureKind = noteFailure(details.url, { error: details.error });
+      // 值得重试的失败开始计时：宽限期内没人来问，就说明页面侧压根没捕获到
+      if (!verdict.blind) expectRetryAsk(details.url, failureKind);
 
       if (dbg.on) {
         dbg('request', 'errored', {
           url: details.url,
           type: details.type ?? null,
           error: details.error,
-          cause: classifyFailure({ error: details.error }),
+          cause: failureKind,
           ruleId: verdict.rule.id,
           blind: verdict.blind,
         });
       }
 
       // 连接层面就失败了，没有对端 IP 可归因，但它确实是一次「本该走代理」的请求，
-      // 不计入总量会让成功率虚高
+      // 不计入总量会让成功率虚高。responded: false 是为了不让它进「无法归因」——
+      // 那一格的含义是「拿到了响应却认不出是哪个节点」，压根没建起连接不算归因失败
       await noteRequestMetric({
         ok: false,
         nodeId: null,
         ruleId: verdict.rule.id,
         blind: verdict.blind,
+        responded: false,
         at: Date.now(),
       });
 

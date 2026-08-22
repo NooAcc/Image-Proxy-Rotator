@@ -236,7 +236,9 @@ function renderMetrics(box) {
     el('dl', { class: 'kpis' },
       kpi({ label: '命中规则', value: req.total, unit: '次' }),
       kpi({
-        label: '真的走代理',
+        // routed = total - blind：连接层就失败的请求同样计入，它证明不了走通了。
+        // 唯一的硬证据是下面的「对端是代理」。标签必须配得上数据
+        label: '送去代理',
         value: req.routed,
         unit: '次',
         tone: req.total > 0 && req.routed === 0 ? 'err' : 'ok',
@@ -247,7 +249,15 @@ function renderMetrics(box) {
         unit: '%',
         tone: req.successRate === null ? '' : (req.successRate >= 95 ? 'ok' : 'warn'),
       }),
-      kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms' }),
+      // 平均值会被长尾拉高、被缓存读拉低，弹窗只有一格的位置，那就给最能代表体感的
+      kpi({ label: '耗时中位数', value: req.latencyP50, unit: 'ms' }),
+      kpi({
+        label: '慢的那一成',
+        value: req.latencyP90,
+        unit: 'ms',
+        tone: req.latencyP90 === null ? '' : (req.latencyP90 >= 8000 ? 'warn' : 'ok'),
+      }),
+      kpi({ label: '缓存命中', value: req.cached, unit: '次' }),
       kpi({
         label: '对端是代理',
         value: req.viaNodeIp,
@@ -288,6 +298,14 @@ function renderMetrics(box) {
         value: retry.exhausted,
         unit: '次',
         tone: retry.exhausted > 0 ? 'err' : '',
+      }),
+      // 不为零说明这个站点的图不是 DOM 里的 <img>，重试机制整体碰不到它们。
+      // 弹窗放不下解释，但这个数字本身就足以让人去设置页看详情
+      kpi({
+        label: '页面没捕获',
+        value: retry.unseen,
+        unit: '次',
+        tone: retry.unseen > 0 ? 'warn' : '',
       }),
       kpi({ label: '兜底接管', value: fb.used, unit: '次' }),
     )));

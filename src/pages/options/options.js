@@ -165,8 +165,10 @@ function renderRunState() {
       ? `成功 ${probe.ok} 次 / 失败 ${probe.fail} 次`
         + (probe.successRate === null ? '' : `（成功率 ${probe.successRate}%）`)
       : '—'),
-    kvRow('可用节点平均延迟', fmtLatency(stats.avgLatency)),
-    kvRow('当前最快节点', stats.fastest
+    // 标签必须说出它量的是什么。真实数据里探测握手 503ms、而拉图 p90 是 15.8s ——
+    // 叫「平均延迟」会被直接读成「图片多久能到」，那是两个数量级的误导
+    kvRow('可用节点探测延迟', fmtLatency(stats.avgLatency)),
+    kvRow('探测最快的节点', stats.fastest
       ? `${stats.fastest.name}（${fmtLatency(stats.fastest.latencyMs)}）`
       : '—'),
   );
@@ -180,12 +182,17 @@ function renderRunState() {
  * 请求统计的 KPI。
  *
  * 这里的 `hint` 一律**按条件给**：数字正常时，解释它为什么可能不正常纯属噪音，
- * 而九张卡片各挂一行常驻说明，等于把整屏最有用的数字挤到折叠线以下。所以
+ * 而十张卡片各挂一行常驻说明，等于把整屏最有用的数字挤到折叠线以下。所以
  * 「什么算成功、耗时怎么算」这类随时成立的话进卡片的 .card__help 折叠区，
  * 这里只留「这个数字现在不对劲」时才需要看到的那一句。
  *
  * 「命中但直连」的完整解释不在 hint 里 —— 它是全屏最值得响的警报，
  * 单独走下面的 blindWarning，那里放得下具体条数和该怎么改。
+ *
+ * **标签必须配得上数据。** 上一版把 `routed`（= total - blind）叫「真的走了代理」，
+ * 而一个 `ERR_CONNECTION_CLOSED` 同样计入 routed —— 它连都没连上，谈不上走通。
+ * 唯一能证明走通的是 `viaNodeIp`。所以这两格现在分别叫「按规则送去代理」和
+ * 「对端确认是代理」：前者是意图，后者是结果。
  */
 function renderRequestKpis() {
   const box = $('requestKpis');
@@ -203,9 +210,25 @@ function renderRequestKpis() {
       unit: '%',
       tone: req.successRate === null ? '' : (req.successRate >= 95 ? 'ok' : 'warn'),
     }),
+    // 平均值不单独出现：真实数据里它是 2ms 缓存与 16s 长尾搅出来的 3.6s，
+    // 谁都没有过那个体验。p50 是「一般多久」，p90 是「最慢的那一成多久」
+    kpi({ label: '耗时中位数', value: req.latencyP50, unit: 'ms' }),
+    kpi({
+      label: '慢的那一成',
+      value: req.latencyP90,
+      unit: 'ms',
+      tone: req.latencyP90 === null ? '' : (req.latencyP90 >= 8000 ? 'warn' : 'ok'),
+      hint: req.latencyP90 !== null && req.latencyP90 >= 8000 ? '十张里有一张要等这么久' : '',
+    }),
     kpi({ label: '平均耗时', value: req.avgLatencyMs, unit: 'ms' }),
     kpi({
-      label: '真的走了代理',
+      label: '缓存命中',
+      value: req.cached,
+      unit: '次',
+      hint: req.cached > 0 ? '没有走网络，不计入上面的总量' : '',
+    }),
+    kpi({
+      label: '按规则送去代理',
       value: req.routed,
       unit: '次',
       // routed = total - blind，所以「routed 为 0」与「blind 等于 total」是同一件事：
@@ -230,7 +253,7 @@ function renderRequestKpis() {
       value: req.unattributed,
       unit: '次',
       tone: req.unattributed > 0 ? 'warn' : '',
-      hint: req.unattributed > 0 ? '认不出是哪个节点，多为共用地址所致' : '',
+      hint: req.unattributed > 0 ? '收到了响应但认不出是哪个节点' : '',
     }),
   );
 
@@ -252,6 +275,10 @@ function renderRequestKpis() {
  * 「重试」为零并不一定是好事 —— 也可能是兜底策略选了「直连原图」，代理连不上时
  * 浏览器静默改走直连、图片正常显示、根本不派发 error。那种矛盾组合由 renderSettings
  * 那边的 retryWarning 负责说，这里只在数字本身不对劲时给色调。
+ *
+ * **两格是补上一版的账。** 「结果未知」和「页面没捕获」以前不存在，于是：
+ * 重发了 7 次、救回 6 次，四个格子加起来却是 6，差的那 1 次无处可查；13 次失败里
+ * 有 3 次内容脚本压根没看见，而「未重试」显示 0，读起来像「每次失败都重试了」。
  */
 function renderRetryKpis() {
   const box = $('retryKpis');
@@ -282,10 +309,29 @@ function renderRetryKpis() {
       hint: retry.exhausted > 0 ? '所有节点都取不到这些图' : '',
     }),
     kpi({
-      label: '未重试',
+      label: '结果未知',
+      value: retry.abandoned,
+      unit: '次',
+      hint: retry.abandoned > 0 ? '重发了，但图片已被页面换掉' : '',
+    }),
+    kpi({
+      label: '还没有结论',
+      value: retry.pending,
+      unit: '次',
+      hint: retry.pending > 0 ? '刚重发出去，仍在等加载结果' : '',
+    }),
+    kpi({
+      label: '判定为不重试',
       value: retry.skipped,
       unit: '次',
-      hint: retry.skipped > 0 ? '多为图源自己返回了 4xx/5xx' : '',
+      hint: retry.skipped > 0 ? '多为图源自己回了 4xx/5xx' : '',
+    }),
+    kpi({
+      label: '页面没捕获',
+      value: retry.unseen,
+      unit: '次',
+      tone: retry.unseen > 0 ? 'warn' : '',
+      hint: retry.unseen > 0 ? '这些裂图重试机制碰不到' : '',
     }),
     kpi({ label: '兜底接管', value: fb.used, unit: '次' }),
     kpi({
@@ -295,45 +341,56 @@ function renderRetryKpis() {
       tone: fb.successRate === null ? '' : (fb.successRate >= 90 ? 'ok' : 'warn'),
     }),
   );
+
+  // 「页面没捕获」不为零是一个结构性结论，不是一次偶发失败：这个站点的图不是
+  // DOM 里的 <img>，重试机制对它整体无效。它值得一条 banner —— 否则用户只会
+  // 反复调重试次数，而那个旋钮对这些图一点作用都没有
+  setBanner($('unseenWarning'), retry.unseen > 0
+    ? `有 ${retry.unseen} 次失败没能被页面捕获到，重试机制碰不到它们。`
+      + '只有 DOM 里的 <img> 会派发可捕获的 error，而很多阅读器用 new Image() 预加载、'
+      + '或用 fetch 取 blob —— 那些图裂了，扩展收不到任何通知，调高重试次数也没有用。'
+      + '这是浏览器扩展的能力边界，详见 docs/LIMITATIONS.md。'
+    : '', 'warn');
 }
 
 /**
- * 有多少组节点共用同一个地址。
- * 共用地址的节点在「节点使用分布」里天然无法区分，必须说清楚，
- * 否则那张表看起来就像「只有一个节点在干活、其余全挂了」。
+ * 节点使用分布。
+ *
+ * **这张表有可能整体没有意义，那就该整体收起来。** 归因靠请求的对端 IP，而
+ * `webRequest` 不给对端端口 —— 于是「一台机器开 19 个端口」这种常见配置下，19 个节点
+ * 在这里根本分不开，表格只会渲染出 19 行 0/0/0/—/0%。上一版加了一段解释文字，话是
+ * 对的，但那 19 行全零仍然摆在那里，读者第一眼看到的还是「轮询好像坏了」。
+ *
+ * 判断「分不分得开」的逻辑在 lib/metrics.js（allShared / sharedHosts）——
+ * 那是关于数据的结论，页面只负责按结论选一种呈现。
  */
-function sharedHostGroups() {
-  const byHost = new Map();
-  for (const node of config.nodes) {
-    if (!isSelectable(node)) continue;
-    byHost.set(node.host, (byHost.get(node.host) ?? 0) + 1);
-  }
-  return [...byHost.entries()].filter(([, count]) => count > 1);
-}
-
-
-
 function renderNodeUsage() {
   const body = $('nodeUsageBody');
   clear(body);
   const rows = metrics?.nodes.rows ?? [];
+  const shared = metrics?.nodes.sharedHosts ?? [];
+  // 全部节点共用地址时，表格里不可能出现任何非零行 —— 收起来，只留那句解释
+  const collapsed = Boolean(metrics?.nodes.allShared);
   const empty = rows.length === 0;
-  $('nodeUsageEmpty').hidden = !empty;
-  $('nodeUsageTable').hidden = empty;
 
-  // 共用地址的节点在这张表里注定分不开，得先把话说明白 ——
-  // 否则「1 个节点 100%、其余 18 个 0%」看起来就像轮询坏了
-  const shared = sharedHostGroups();
+  $('nodeUsageEmpty').hidden = !empty || collapsed;
+  $('nodeUsageTable').hidden = empty || collapsed;
+
   const note = $('nodeUsageShared');
   note.hidden = shared.length === 0;
   if (shared.length > 0) {
-    const detail = shared.map(([host, count]) => `${host}（${count} 个）`).join('、');
-    note.textContent = `注意：${detail} 上的节点共用同一个地址，只有端口不同。`
-      + '浏览器只告诉扩展对端的 IP、不给端口，所以这些节点在本表里无法区分，'
-      + `它们的请求全部计入上面的「无法归因」。想确认轮询是否均匀，请看代理服务商后台的分端口流量。`;
+    const detail = shared.map(({ host, count }) => `${host}（${count} 个）`).join('、');
+    note.textContent = collapsed
+      ? `你的 ${rows.length} 个节点全在 ${detail} 上，只有端口不同。浏览器只告诉扩展对端的 IP、`
+        + '不给端口，所以这张表分不出是哪个节点 —— 逐行列出只会得到一片 0，索性收起来了。'
+        + '这些请求全部计入上面的「无法归因」。想确认轮询是否均匀，'
+        + '请看代理服务商后台的分端口流量（步骤见 docs/VERIFICATION.md）。'
+      : `注意：${detail} 上的节点共用同一个地址，只有端口不同。`
+        + '浏览器只告诉扩展对端的 IP、不给端口，所以这些节点在本表里无法区分，'
+        + '它们的请求全部计入上面的「无法归因」。想确认轮询是否均匀，请看代理服务商后台的分端口流量。';
   }
 
-  if (empty) return;
+  if (empty || collapsed) return;
 
   for (const row of rows) {
     body.append(el('tr', { class: row.exists ? '' : 'is-off' },

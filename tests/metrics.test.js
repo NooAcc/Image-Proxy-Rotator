@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 
 import {
   MAP_CAP,
+  LATENCY_BUCKETS_MS,
   emptyMetrics,
   normalizeMetrics,
   noteRequest,
@@ -35,10 +36,14 @@ test('emptyMetrics 每次都是新对象，字段齐全且全为零', () => {
   const b = emptyMetrics();
   assert.notEqual(a, b, '不能共享引用，否则两处计数会互相污染');
   assert.equal(a.since, null);
-  assert.deepEqual(a.requests, { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0, blind: 0, viaNodeIp: 0 });
+  assert.deepEqual(a.requests, {
+    total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0,
+    unattributed: 0, blind: 0, viaNodeIp: 0, cached: 0,
+  });
+  assert.deepEqual(a.latency, new Array(LATENCY_BUCKETS_MS.length + 1).fill(0));
   assert.deepEqual(a.perNode, {});
   assert.deepEqual(a.perRule, {});
-  assert.deepEqual(a.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 });
+  assert.deepEqual(a.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0 });
   assert.deepEqual(a.fallbackImage, { used: 0, ok: 0, fail: 0 });
   assert.deepEqual(a.retired, { nodeUsed: 0, nodeOk: 0, nodeFail: 0, ruleHits: 0 });
   assert.deepEqual(a.probe, { ok: 0, fail: 0, lastAt: null });
@@ -308,15 +313,19 @@ test('normalizeMetrics 之后立刻能继续计数', () => {
 
 // ---------------------------------------------------------------- 重试与兜底
 
-test('noteRetry 四个口径互不重叠', () => {
+test('noteRetry 六个口径互不重叠', () => {
   const m = emptyMetrics();
   noteRetry(m, { kind: 'attempted', at: 1000 });
   noteRetry(m, { kind: 'attempted' });
   noteRetry(m, { kind: 'recovered' });
   noteRetry(m, { kind: 'exhausted' });
   noteRetry(m, { kind: 'skipped' });
+  noteRetry(m, { kind: 'abandoned' });
+  noteRetry(m, { kind: 'unseen' });
 
-  assert.deepEqual(m.retry, { attempted: 2, recovered: 1, exhausted: 1, skipped: 1 });
+  assert.deepEqual(m.retry, {
+    attempted: 2, recovered: 1, exhausted: 1, skipped: 1, abandoned: 1, unseen: 1,
+  });
   assert.equal(m.since, 1000, '第一次重试判定也该点亮 since');
 });
 
@@ -326,7 +335,9 @@ test('noteRetry 对未知口径与脏输入无动于衷，不会凭空长出字�
     noteRetry(m, { kind });
   }
   noteRetry(m);
-  assert.deepEqual(m.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 });
+  assert.deepEqual(m.retry, {
+    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0,
+  });
 });
 
 test('兜底的 used 与 ok/fail 是两个时刻，可以先记 used 后补成败', () => {
@@ -353,14 +364,18 @@ test('normalizeMetrics 读回新计数器，缺字段补零、脏值归零', () 
     retry: { attempted: 7, recovered: '3', exhausted: -1, skipped: NaN },
     fallbackImage: { used: 2.6, ok: 1 },
   });
-  assert.deepEqual(m.retry, { attempted: 7, recovered: 3, exhausted: 0, skipped: 0 });
+  assert.deepEqual(m.retry, {
+    attempted: 7, recovered: 3, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0,
+  });
   assert.deepEqual(m.fallbackImage, { used: 3, ok: 1, fail: 0 });
 });
 
 test('旧版存储里没有这两个桶时读回全零，而不是 undefined', () => {
   // 用户从旧版本升上来时存储里只有 requests / perNode，读回来必须是能直接继续累加的形状
   const m = normalizeMetrics({ requests: { total: 5, ok: 5 } });
-  assert.deepEqual(m.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 });
+  assert.deepEqual(m.retry, {
+    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0,
+  });
   assert.deepEqual(m.fallbackImage, { used: 0, ok: 0, fail: 0 });
 });
 
@@ -392,4 +407,224 @@ test('剪枝不碰重试与兜底 —— 它们不是按实体分桶的', () => 
   pruneMetrics(m, { nodeIds: [], ruleIds: [] });
   assert.equal(m.retry.attempted, 1);
   assert.equal(m.fallbackImage.used, 1);
+});
+
+// ---------------------------------------------------------------- 缓存命中
+
+/*
+ * 真实数据（logs/debug，2026-08-23）：481 条 request 事件只对应 236 个不同 URL，
+ * 重复出现的 241 条中位数是 3ms —— 那是磁盘缓存，不是代理往返。旧实现从不读
+ * `details.fromCache`，于是把它们全当成新的代理请求，「走了代理」虚高约一倍，
+ * 「平均耗时」变成 2ms 缓存与 16s 真实请求的混合物。
+ */
+
+test('缓存命中单独计数，不进总量、成败、耗时与归因', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: true, latencyMs: 3, cached: true, viaNodeIp: true, ruleId: 'r_1', at: 1000 });
+
+  assert.equal(m.requests.cached, 1);
+  assert.equal(m.requests.total, 0, '缓存没有走网络，不该进「命中规则的请求」总量');
+  assert.equal(m.requests.ok, 0);
+  assert.equal(m.requests.latencyCount, 0, '2ms 的缓存读会把平均耗时拉成没有意义的数');
+  assert.equal(m.requests.viaNodeIp, 0, '缓存命中时浏览器给的仍是上次的对端 IP，不是新证据');
+  assert.equal(m.requests.unattributed, 0);
+});
+
+test('缓存命中不算规则在干活', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: true, latencyMs: 3, cached: true, ruleId: 'r_1' });
+  assert.deepEqual(m.perRule, {}, '路由这次请求的是缓存，不是规则');
+});
+
+test('缓存命中也点亮 since', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: true, cached: true, at: 777 });
+  assert.equal(m.since, 777);
+});
+
+test('summarizeMetrics 把缓存命中单列出来', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: true, latencyMs: 1200, responded: true });
+  noteRequest(m, { ok: true, latencyMs: 3, cached: true });
+  noteRequest(m, { ok: true, latencyMs: 3, cached: true });
+
+  const view = summarizeMetrics(m);
+  assert.equal(view.requests.cached, 2);
+  assert.equal(view.requests.total, 1);
+  assert.equal(view.requests.avgLatencyMs, 1200, '平均耗时只该由真实网络请求组成');
+});
+
+// ---------------------------------------------------------------- 延迟分位数
+
+/*
+ * 平均值单独一个数会骗人：真实数据里首次请求 p50 是 1.2s，p90 却是 15.8s。
+ * 只报 avg 会让「大部分图其实很慢」这件事完全看不见。存的是固定桶的直方图，
+ * 不是样本 —— 体积仍与运行时长无关（决策 D14）。
+ */
+
+test('延迟落进固定桶，桶数恒定不随请求数增长', () => {
+  const m = emptyMetrics();
+  for (let i = 0; i < 1000; i++) noteRequest(m, { ok: true, latencyMs: i, responded: true });
+  assert.equal(m.latency.length, LATENCY_BUCKETS_MS.length + 1);
+  assert.equal(m.latency.reduce((a, b) => a + b, 0), 1000, '每个样本恰好落一个桶');
+});
+
+test('分位数落在真值所在的桶里', () => {
+  const m = emptyMetrics();
+  for (let i = 0; i < 80; i++) noteRequest(m, { ok: true, latencyMs: 30, responded: true });
+  for (let i = 0; i < 20; i++) noteRequest(m, { ok: true, latencyMs: 12000, responded: true });
+
+  const view = summarizeMetrics(m);
+  assert.ok(view.requests.latencyP50 > 0 && view.requests.latencyP50 <= 50,
+    `真值 30ms，p50 应落在最低桶里，实际 ${view.requests.latencyP50}`);
+  assert.ok(view.requests.latencyP90 > 8000 && view.requests.latencyP90 <= 16000,
+    `真值 12000ms，p90 应落在 (8000,16000] 桶里，实际 ${view.requests.latencyP90}`);
+});
+
+test('没有耗时样本时分位数是「无」而不是 0', () => {
+  const view = summarizeMetrics(emptyMetrics());
+  assert.equal(view.requests.latencyP50, null);
+  assert.equal(view.requests.latencyP90, null);
+});
+
+test('超过最大桶的样本报成桶下界，不假装知道具体值', () => {
+  const m = emptyMetrics();
+  for (let i = 0; i < 10; i++) noteRequest(m, { ok: true, latencyMs: 600000, responded: true });
+  const view = summarizeMetrics(m);
+  const last = LATENCY_BUCKETS_MS[LATENCY_BUCKETS_MS.length - 1];
+  assert.equal(view.requests.latencyP90, last, '只知道「≥ 最大桶下界」，不该编一个精确值');
+});
+
+test('normalizeMetrics 修得好被改坏的直方图', () => {
+  const restored = normalizeMetrics({ latency: [1, -2, 'x', null] });
+  assert.equal(restored.latency.length, LATENCY_BUCKETS_MS.length + 1);
+  assert.equal(restored.latency[0], 1);
+  assert.equal(restored.latency[1], 0, '负数归零');
+  assert.equal(restored.latency[2], 0, '非数归零');
+});
+
+// ---------------------------------------------------------------- 归因口径
+
+/*
+ * 连接层就失败的请求（ERR_CONNECTION_CLOSED）压根没有对端 IP，
+ * 谈不上「归因失败」。旧实现把这 13 次也算进「无法归因」，
+ * 于是那一格显示 481 —— 等于请求总数，看起来像归因彻底失灵。
+ */
+
+test('没拿到响应的请求不计入「无法归因」，但仍算一次失败', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: false, responded: false, ruleId: 'r_1' });
+
+  assert.equal(m.requests.total, 1, '它确实是一次本该走代理的请求，不计入会让成功率虚高');
+  assert.equal(m.requests.fail, 1);
+  assert.equal(m.requests.unattributed, 0, '连接都没建起来，没有对端 IP 可归因');
+});
+
+test('拿到了响应却认不出节点，才算无法归因', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: true, responded: true, viaNodeIp: true, ruleId: 'r_1' });
+  assert.equal(m.requests.unattributed, 1);
+});
+
+// ---------------------------------------------------------------- 重试的两个新口径
+
+/*
+ * abandoned：重发出去了，但既没收到 load 也没收到 error —— 元素被页面换掉或
+ *   导航走了。真实数据里 attempted=7 / recovered=6，差的那 1 次就是它，
+ *   而旧面板四个格子加起来是 6，那 1 次无处可查。
+ * unseen：网络层失败了，但页面侧压根没捕获到（阅读器用 new Image() 预加载，
+ *   不在 DOM 上的 Image 不会经过 document 的捕获阶段）。真实数据里 13 次失败
+ *   有 3 次属于此类，而旧面板「未重试」显示 0，读起来像「每次失败都重试了」。
+ */
+
+test('summarizeMetrics 暴露 abandoned 与 unseen，并把悬空的算清楚', () => {
+  const m = emptyMetrics();
+  for (let i = 0; i < 7; i++) noteRetry(m, { kind: 'attempted' });
+  for (let i = 0; i < 6; i++) noteRetry(m, { kind: 'recovered' });
+  noteRetry(m, { kind: 'abandoned' });
+  for (let i = 0; i < 3; i++) noteRetry(m, { kind: 'unseen' });
+
+  const view = summarizeMetrics(m);
+  assert.equal(view.retry.abandoned, 1);
+  assert.equal(view.retry.unseen, 3);
+  assert.equal(view.retry.pending, 0, 'attempted 全部有了结论，不该有悬空');
+});
+
+test('重发了却还没有结论的次数单独可见', () => {
+  const m = emptyMetrics();
+  for (let i = 0; i < 5; i++) noteRetry(m, { kind: 'attempted' });
+  noteRetry(m, { kind: 'recovered' });
+
+  const view = summarizeMetrics(m);
+  assert.equal(view.retry.pending, 4, '悬空的 4 次必须能在面板上看见，不能只体现为成功率变小');
+});
+
+// ---------------------------------------------------------------- 共用地址的节点
+
+/*
+ * 真实配置：19 个节点全在 10.0.0.3 上，只有端口不同。浏览器只给对端 IP、不给端口，
+ * 所以「是哪个节点」这个问题无法回答 —— 面板于是渲染出 19 行 0/0/0/—/0%。
+ * 解释文字是对的，但那张全零的表本身就是噪音。判断「这张表还有意义吗」是纯逻辑，
+ * 放在这里，两个页面共用一份，不在 UI 里各写一遍。
+ */
+
+/** 一个真的能进轮询池的节点 —— 判断共用地址时只数这些 */
+const proxyNode = (id, host, port, extra = {}) => ({
+  id, name: id, protocol: 'http', host, port, enabled: true, autoDisabled: false, ...extra,
+});
+
+test('共用同一地址的节点被点出来，附带各自有几个', () => {
+  const view = summarizeMetrics(emptyMetrics(), {
+    nodes: [
+      proxyNode('n_a', '10.0.0.3', 24000),
+      proxyNode('n_b', '10.0.0.3', 24001),
+      proxyNode('n_c', '10.0.0.9', 24002),
+    ],
+  });
+  assert.deepEqual(view.nodes.sharedHosts, [{ host: '10.0.0.3', count: 2 }]);
+  assert.equal(view.nodes.allShared, false, '还有一个地址唯一的节点，表仍然有意义');
+});
+
+test('每个节点都在共用地址里时，逐行列出只是噪音', () => {
+  const view = summarizeMetrics(emptyMetrics(), {
+    nodes: [proxyNode('n_a', '10.0.0.3', 24000), proxyNode('n_b', '10.0.0.3', 24001)],
+  });
+  assert.equal(view.nodes.allShared, true);
+});
+
+test('地址各不相同时不报共用，也不折叠', () => {
+  const view = summarizeMetrics(emptyMetrics(), {
+    nodes: [proxyNode('n_a', '10.0.0.3', 24000), proxyNode('n_b', '10.0.0.4', 24001)],
+  });
+  assert.deepEqual(view.nodes.sharedHosts, []);
+  assert.equal(view.nodes.allShared, false);
+});
+
+test('一个节点都没配时不算「全部共用」', () => {
+  const view = summarizeMetrics(emptyMetrics(), { nodes: [] });
+  assert.deepEqual(view.nodes.sharedHosts, []);
+  assert.equal(view.nodes.allShared, false, '空配置该走「还没有数据」那条路，不是折叠');
+});
+
+test('不可用协议的节点不参与共用地址的判断', () => {
+  // 它压根进不了轮询池，拿它去论证「这张表分不开」是错的
+  const view = summarizeMetrics(emptyMetrics(), {
+    nodes: [
+      proxyNode('n_a', '10.0.0.3', 24000),
+      proxyNode('n_b', '10.0.0.3', 24001, { protocol: 'socks5' }),
+    ],
+  });
+  assert.deepEqual(view.nodes.sharedHosts, [], '只剩一个真正可用的节点，不存在共用');
+  assert.equal(view.nodes.allShared, false);
+});
+
+test('被禁用的节点也不参与共用地址的判断', () => {
+  const view = summarizeMetrics(emptyMetrics(), {
+    nodes: [
+      proxyNode('n_a', '10.0.0.3', 24000),
+      proxyNode('n_b', '10.0.0.3', 24001, { enabled: false }),
+      proxyNode('n_c', '10.0.0.3', 24002, { autoDisabled: true }),
+    ],
+  });
+  assert.deepEqual(view.nodes.sharedHosts, []);
 });

@@ -12,7 +12,7 @@
 import { decideRetry } from '../lib/retry.js';
 import { matchPacUrl } from '../lib/rule-matcher.js';
 import { getConfig, getLogger, queueRuntimeSave } from './state.js';
-import { observedFailure, forgetFailure } from './request-logger.js';
+import { observedFailure, forgetFailure, noteRetryAsked } from './request-logger.js';
 import { noteRetryMetric, noteFallbackImageMetric } from './metrics-store.js';
 import { dbg } from './debug-store.js';
 
@@ -70,6 +70,10 @@ const GIVE_UP_TEXT = {
  * @returns {Promise<{action: 'retry'|'fallback'|'give-up', url?: string, delayMs?: number, reason?: string}>}
  */
 export async function planRetry({ url, attempt } = {}) {
+  // 页面来问了，就撤销「这次失败页面没捕获到」的判定 —— 无论接下来决定重不重试。
+  // 放在最前面：下面每一条提前返回都同样意味着「页面确实看见了」
+  if (typeof url === 'string' && url) noteRetryAsked(url);
+
   const config = await getConfig();
   const give = (reason) => {
     // 这一路提前返回**不写活动日志也不计数**，于是「为什么这张图没被重发」在别处
@@ -188,11 +192,17 @@ export async function planRetry({ url, attempt } = {}) {
  * 这是 `retry.recovered` 唯一的来源 —— 它是「重发之后真的收到了 load 事件」，
  * 不是「大概成功了」（决策 D24）。
  *
- * @param {{url: string, kind: 'retry'|'fallback', ok: boolean}} report
+ * `ok: null` 是第三种结果：**不会再有结果了**。元素被页面换掉或导航走之后，渲染进程
+ * 不会在它上面派发任何事件，内容脚本用超时兜住这种情况。不单列它，`attempted` 就会
+ * 永久悬空 —— 真实数据里 attempted=7 / recovered=6，那 1 次差额正是如此。
+ *
+ * @param {{url: string, kind: 'retry'|'fallback'|'budget', ok: ?boolean}} report
+ *   ok 为 true = 收到 load，false = 又失败了，null = 永远不会有结论
  */
 export async function noteRetryOutcome({ url, kind, ok } = {}) {
   const succeeded = ok === true;
-  if (dbg.on) dbg('retry', 'outcome', { url: url ?? null, kind: kind ?? null, ok: succeeded });
+  const abandoned = ok === null || ok === undefined;
+  if (dbg.on) dbg('retry', 'outcome', { url: url ?? null, kind: kind ?? null, ok: abandoned ? null : succeeded });
 
   // 页面侧的重试预算用完了。上限是刻意设的，但绝不能悄悄生效 —— 不说的话，
   // 用户看到的是「重试到一半就不重试了」，而统计里找不到任何解释
@@ -205,6 +215,13 @@ export async function noteRetryOutcome({ url, kind, ok } = {}) {
         + '这通常意味着大批节点同时不可用 —— 请到设置页做一次全量测速。',
     });
     queueRuntimeSave();
+    return { ok: true };
+  }
+
+  if (abandoned) {
+    // 兜底那一路只有 used / ok / fail 三个口径，没有「结果未知」的位置；
+    // 而重发的悬空是必须能看见的，所以只在 retry 这一路记
+    if (kind !== 'fallback') await noteRetryMetric({ kind: 'abandoned', at: Date.now() });
     return { ok: true };
   }
 
