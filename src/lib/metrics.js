@@ -43,6 +43,15 @@ export function emptyMetrics() {
     since: null,
     requests: { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0, blind: 0, viaNodeIp: 0 },
 
+    /**
+     * 重试。**全是观测值，没有一个是推断的**（决策 D24）：重试由本扩展的内容脚本
+     * 亲自发起，重发之后是 load 还是 error 也由它回报，所以 recovered 是「真的收到了
+     * load 事件」而不是「大概成功了」。
+     */
+    retry: { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 },
+    /** 兜底图片代理：轮询节点全试过之后接手了多少次，以及它自己的成败 */
+    fallbackImage: { used: 0, ok: 0, fail: 0 },
+
     /** @type {Record<string, {used: number, ok: number, fail: number}>} */
     perNode: {},
     /** @type {Record<string, {hits: number}>} */
@@ -69,6 +78,12 @@ export function normalizeMetrics(raw) {
   const req = raw.requests;
   if (req && typeof req === 'object') {
     for (const key of Object.keys(base.requests)) base.requests[key] = count(req[key]);
+  }
+
+  for (const bucket of ['retry', 'fallbackImage']) {
+    if (raw[bucket] && typeof raw[bucket] === 'object') {
+      for (const key of Object.keys(base[bucket])) base[bucket][key] = count(raw[bucket][key]);
+    }
   }
 
   if (raw.perNode && typeof raw.perNode === 'object' && !Array.isArray(raw.perNode)) {
@@ -171,6 +186,41 @@ export function noteRequest(metrics, { ok, latencyMs, nodeId, viaNodeIp = false,
   return metrics;
 }
 
+
+/**
+ * 记一次重试判定的结果。
+ *
+ * 四个口径互不重叠，合起来等于「后台被问过多少次『这张图该怎么办』」：
+ *   · attempted —— 判定为重发，内容脚本真的重新赋值了 src
+ *   · recovered —— 重发之后收到了 load。**这是回报值，不是推断值**（决策 D24）
+ *   · exhausted —— 用尽 maxAttempts 仍失败（不论后面有没有兜底接手）
+ *   · skipped   —— 不该重试：URL 不归本扩展管、原因不是代理故障、或压根查不到原因
+ *
+ * @param {object} metrics 就地修改
+ * @param {{kind: 'attempted'|'recovered'|'exhausted'|'skipped', at?: number}} event
+ */
+export function noteRetry(metrics, { kind, at } = {}) {
+  touch(metrics, at);
+  if (typeof kind === 'string' && Object.hasOwn(metrics.retry, kind)) metrics.retry[kind]++;
+  return metrics;
+}
+
+/**
+ * 记一次兜底图片代理的动作。
+ *
+ * `used` 与 `ok` / `fail` 是两个时刻：改写地址时记 used，浏览器加载完之后内容脚本
+ * 再回报一次成败。所以 `used` 会先于 `ok + fail` 增长，短暂对不上是正常的。
+ *
+ * @param {object} metrics 就地修改
+ * @param {{used?: boolean, ok?: ?boolean, at?: number}} event
+ */
+export function noteFallbackImage(metrics, { used = false, ok = null, at } = {}) {
+  touch(metrics, at);
+  if (used) metrics.fallbackImage.used++;
+  if (ok === true) metrics.fallbackImage.ok++;
+  else if (ok === false) metrics.fallbackImage.fail++;
+  return metrics;
+}
 
 /** 记一次延迟探测的结果 */
 export function noteProbe(metrics, { ok, at } = {}) {
@@ -329,6 +379,24 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       routed: Math.max(0, req.total - req.blind),
       successRate: rate(req.ok, req.total),
       avgLatencyMs: req.latencyCount ? Math.round(req.latencySum / req.latencyCount) : null,
+    },
+
+    /**
+     * 重试。注意 `requests.total` 是**含重试**的 —— 重发就是一次新请求，webRequest
+     * 会照实再记一笔。所以开启重试之后成功率会比以前低，`attempted` 就是用来对账的。
+     */
+    retry: {
+      attempted: m.retry.attempted,
+      recovered: m.retry.recovered,
+      exhausted: m.retry.exhausted,
+      skipped: m.retry.skipped,
+      recoveryRate: rate(m.retry.recovered, m.retry.attempted),
+    },
+    fallbackImage: {
+      used: m.fallbackImage.used,
+      ok: m.fallbackImage.ok,
+      fail: m.fallbackImage.fail,
+      successRate: rate(m.fallbackImage.ok, m.fallbackImage.ok + m.fallbackImage.fail),
     },
 
     nodes: { rows: nodeRows, totalUsed: nodeTotal, retiredUsed: m.retired.nodeUsed },

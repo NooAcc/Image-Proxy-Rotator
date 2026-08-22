@@ -165,10 +165,14 @@ retry: {
   attempted,   // 发起重试的次数
   recovered,   // 重试后加载成功的次数（内容脚本回报 load）
   exhausted,   // 用尽 maxAttempts 仍失败
-  skipped,     // 因不匹配规则 / 原因不是代理故障 / 查不到原因而没重试
+  skipped,     // **你的**图片里判定不该重试的：原因不是代理故障 / 查不到原因
 },
 fallbackImage: { used, ok, fail },
 ```
+
+`skipped` 刻意**不含**「不匹配任何规则」那一类。用户随手逛的任何网站上的裂图都会走到
+那条判定，把它记进来会让这一格变成与配置无关的噪音计数 —— 看到「未重试 47 次」
+只会以为哪里出了问题。这一格的含义必须是「**你的**图片里有几张我们决定不重试」。
 
 **口径变化要写在统计页上**：重试会让 `requests.total` 变大（重发就是一次新请求，
 `webRequest` 会照实记一笔），所以成功率会比现在低。`retry.attempted` 就是用来对账的。
@@ -215,35 +219,44 @@ fallbackImage: { used, ok, fail },
 
 **新增**
 
-- `src/content/retry.js` —— 内容脚本（隔离世界）
-- `src/lib/image-proxy.js` —— 模板校验与改写，纯函数
-- `src/background/retry-coordinator.js` —— 重试决策
+- `src/content/retry.js` —— 内容脚本（隔离世界，classic script）
+- `src/lib/image-proxy.js` —— 兜底模板的校验与改写，纯函数
+- `src/lib/retry.js` —— 失败原因分类与重试判定，纯函数
+- `src/background/retry-coordinator.js` —— 编排：凑齐入参、写统计、写日志
+
+判定逻辑放 `src/lib/` 而不是塞进 coordinator：这样「什么情况下该重发」能在 Node 里
+逐条钉死，不需要 chrome 替身（决策 D6）。coordinator 只负责把三样东西凑齐
+（规则是否命中、失败原因、设置项）然后调它。
 
 **改动**
 
 - `manifest.json` —— `content_scripts`
-- `src/lib/constants.js` —— 新设置默认值
+- `src/lib/constants.js` —— 新设置默认值与上限
 - `src/lib/schema.js` —— `normalizeRetrySettings` / `normalizeFallbackImage`
 - `src/lib/metrics.js` —— `retry` / `fallbackImage` 计数器
-- `src/background/request-logger.js` —— 失败原因表 + 查询接口
-- `src/background/messaging.js` —— `imageRetryAsk` / `imageRetryResult`
-- `src/pages/options/{options.html,options.js,options.css}` —— 「重试与兜底」卡片、统计 KPI
-- `src/pages/popup/popup.js` —— 统计 KPI
-- `tools/check-manifest.mjs` —— 消息契约校验加扫 `src/content/`；校验 `content_scripts` 引用的文件存在
-- `docs/ARCHITECTURE.md` —— D20–D24、模块职责表、数据结构
-- `docs/LIMITATIONS.md` —— 新增一节：覆盖面缺口与 `fallback: 'direct'` 的矛盾
+- `src/background/request-logger.js` —— 失败原因表 + `observedFailure()` / `forgetFailure()`
+- `src/background/metrics-store.js` —— 两个新的 note 入口
+- `src/background/messaging.js` —— `imageRetryAsk` / `imageRetryResult` / `previewFallbackImage`
+- `src/pages/options/{options.html,options.js}` —— 「重试与兜底」两张卡片
+- `src/pages/popup/popup.js` —— 统计视图新增一段
+- `tools/check-manifest.mjs` —— 校验 `content_scripts` 引用的文件存在、内容脚本里没有
+  `import`/`export`（MV3 不支持 ESM，有一句就整块静默失效）、消息契约扫描扩到 `src/content/`
+- `tools/pack.mjs` —— `manifestRefs()` 加上 `content_scripts`，漏打包会让功能整块消失
+- `docs/ARCHITECTURE.md` —— D20–D24、重试链时序图、模块职责、数据结构
+- `docs/LIMITATIONS.md` —— 新增第 14–17 节
+- `docs/VERIFICATION.md` —— 新增第 13–15 条人工验收
+- `README.md` —— 上手第 7 步、设置表、统计说明、权限说明
 
 ## 测试
 
 | 文件 | 覆盖 |
 |---|---|
-| `tests/image-proxy.test.js`（新） | 模板校验（协议、占位符）、`{url}` 百分号编码正确、`{raw}` 原样、非法模板返回 null |
-| `tests/retry-coordinator.test.js`（新） | 各类失败原因的判定、次数上限、兜底移交、不匹配规则时不干预、查不到原因时保守放弃 |
-| `tests/content-retry.test.js`（新） | 用极小 DOM 替身验 error 捕获、`src` 重赋值真的触发、同一元素不重复计数、每页重试预算上限 |
-| `tests/metrics.test.js` | 新计数器的累加与 `summarizeMetrics` 输出 |
-| `tests/storage.test.js` | 新设置项的规范化与夹取 |
-| `tests/background.test.js` | 代理层错误 → 判定重试；404 → 判定不重试；查不到原因 → 保守放弃；失败原因表会过期 |
-| `tests/ui-contract.test.js` | 新增 id 都存在、无孤儿 id、新控件有可访问名 |
+| `tests/image-proxy.test.js`（新） | 模板校验（协议、占位符）、`{url}` 百分号编码正确、`{raw}` 原样、防自套娃 |
+| `tests/retry.test.js`（新） | 失败原因分类的每一类、次数上限、兜底移交、脏输入 |
+| `tests/retry-coordinator.test.js`（新） | 后台编排：观测→查表→判定→计数→日志的完整往返、失败原因表的过期与容量、日志节流、模板预览 |
+| `tests/content-retry.test.js`（新） | `node:vm` + DOM 替身**真的执行**内容脚本：捕获阶段挂载、`src`/`srcset`/`<picture>` 三种重发路径、结果回报、防套娃、单页预算 |
+| `tests/metrics.test.js` | 新计数器的累加、读回、汇总与剪枝 |
+| `tests/storage.test.js` | 新设置项的规范化、夹取、导出导入往返 |
+| `tests/pack.test.js` | `content_scripts` 引用的文件必须在包内 |
 
-`npm run check` 的现有六条静态校验全部保持通过，另加两条（`content_scripts` 文件存在、
-内容脚本发出的消息类型有对应 handler）。
+`npm run check` 的静态校验从六条加到八条。全量：**405 个测试**。

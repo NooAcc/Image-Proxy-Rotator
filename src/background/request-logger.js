@@ -18,23 +18,84 @@
  * 归因说明：按对端 IP 反查节点**会漏**（IP 未知、多个节点共用地址）。漏掉的请求记进
  * metrics 的 unattributed，而不是丢弃、也不硬塞给某个节点 —— 「有 12 次没归因上」是
  * 有用的信息，一个凑整的假数字不是。
+ *
+ * 除了记日志与计数，本模块还兼一件事：把每次失败的**原因**按 URL 暂存一小会儿
+ * （`observedFailure()`），供重试判定查询。这是整套重试机制唯一能区分「代理连不上」
+ * 和「图源回了 404」的地方 —— 内容脚本只看得到「图裂了」（决策 D22）。
  */
 
 import { matchUrl, matchPacUrl } from '../lib/rule-matcher.js';
 import { pacUrl } from '../lib/pac-url.js';
 import { getConfig, getLogger, queueRuntimeSave, updateConfig } from './state.js';
 import { noteRequestMetric } from './metrics-store.js';
-import { PROBE_PARAM } from '../lib/constants.js';
+import { PROBE_PARAM, FAILURE_TTL_MS } from '../lib/constants.js';
+import { classifyFailure } from '../lib/retry.js';
 
 /** requestId -> {url, startedAt}，用于算耗时 */
 const pending = new Map();
 const PENDING_CAP = 500;
 
 /**
+ * URL -> {kind, at}：最近一次失败的**原因**，供重试判定查询（决策 D22）。
+ *
+ * 为什么这张表必须存在：内容脚本只知道「这张图裂了」，分不清是代理连不上还是图源
+ * 回了 404。而换一个代理去取同一个 404 毫无意义，只是白给图源添一次请求。真正的原因
+ * 只有这里看得到 —— `onErrorOccurred` 给错误码，`onCompleted` 给状态码。
+ *
+ * 只记**失败**：成功的请求不会有人来查（图片加载成功就不会派发 error），
+ * 而一个漫画页几百个成功请求全记下来纯属浪费。查不到条目时重试判定保守放弃。
+ */
+const failures = new Map();
+const FAILURE_CAP = 300;
+
+/**
  * 已经就「这条规则对 HTTPS 不生效」告警过的规则 id。
  * 一个漫画页能打出几百个请求，同一条规则不该在日志里刷几百遍同样的话。
  */
 const blindWarned = new Set();
+
+/** 记下一次失败的原因。就地做过期清理与容量收口，不另开定时器 */
+function noteFailure(url, observed) {
+  const kind = classifyFailure(observed);
+  if (kind === 'ok' || kind === 'unknown') return;
+
+  const now = Date.now();
+  failures.set(String(url), { kind, at: now });
+
+  if (failures.size <= FAILURE_CAP) return;
+  // 先扫掉过期的；Map 保持插入顺序，所以不够的话继续从最旧的开始丢
+  for (const [key, value] of failures) {
+    if (now - value.at > FAILURE_TTL_MS) failures.delete(key);
+  }
+  for (const key of failures.keys()) {
+    if (failures.size <= FAILURE_CAP) break;
+    failures.delete(key);
+  }
+}
+
+/**
+ * 查一个 URL 最近一次失败的原因。
+ * @returns {'proxy'|'network'|'origin'|'aborted'|'other'|null} 没记录或已过期时返回 null
+ */
+export function observedFailure(url) {
+  const record = failures.get(String(url));
+  if (!record) return null;
+  if (Date.now() - record.at > FAILURE_TTL_MS) {
+    failures.delete(String(url));
+    return null;
+  }
+  return record.kind;
+}
+
+/** 重试成功之后把记录清掉，免得同一个 URL 下次裂图时读到一条过期原因 */
+export function forgetFailure(url) {
+  failures.delete(String(url));
+}
+
+/** 清空失败原因表。供测试拿到干净起点 —— 这张表活在模块作用域里，清存储清不掉它 */
+export function resetObservedFailures() {
+  failures.clear();
+}
 
 function shorten(url, max = 90) {
   const text = String(url);
@@ -140,6 +201,10 @@ export function installRequestLogger() {
       const attributed = blind ? { node: null, shared: 0, viaNodeIp: false } : attribute(config.nodes, details.ip);
       const latencyMs = record ? Date.now() - record.startedAt : null;
 
+      // 状态码 ≥ 400 时留一条原因给重试判定 —— 它会据此拒绝重试，
+      // 因为换个代理拿到的还是同一个 404
+      if (!ok) noteFailure(details.url, { statusCode: details.statusCode });
+
       await noteRequestMetric({
         ok,
         latencyMs,
@@ -178,6 +243,9 @@ export function installRequestLogger() {
       if (probeNodeId(details.url)) return; // 探测失败由 health-monitor 记
       const verdict = classify(details.url, config.rules);
       if (!verdict) return;
+
+      // 失败原因留给重试判定。这是它唯一能知道「是代理连不上，还是别的什么」的来源
+      noteFailure(details.url, { error: details.error });
 
       // 连接层面就失败了，没有对端 IP 可归因，但它确实是一次「本该走代理」的请求，
       // 不计入总量会让成功率虚高

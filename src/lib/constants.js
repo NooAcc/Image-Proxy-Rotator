@@ -25,6 +25,25 @@ export const ALARM_PROBE = 'pp-probe';
 export const SLOW_LATENCY_MS = 2000;
 
 /**
+ * 每张图最多能尝试几个节点的硬上限。
+ * 上限存在的意义是防止误配把一张裂图变成几十次重刷 —— 图源的速率限制不会因为
+ * 换了代理就消失，重试次数堆得越高越像在打人家的站点。
+ */
+export const RETRY_ATTEMPTS_CAP = 10;
+
+/** 重发前的等待时长上限（毫秒） */
+export const RETRY_DELAY_CAP_MS = 5000;
+
+/**
+ * 「失败原因」在后台留存多久（毫秒）。
+ *
+ * 内容脚本只知道「图裂了」，分不清是代理连不上还是图源回了 404；后台在 webRequest 上
+ * 看到了真正的错误码，把它按 URL 暂存一小会儿供重试判定查询（决策 D22）。留 30 秒是
+ * 因为渲染进程派发 error 与 webRequest 回调之间没有顺序保证，但也不会差出一整分钟。
+ */
+export const FAILURE_TTL_MS = 30000;
+
+/**
  * **唯一**可用于分流的协议。
  *
  * 这是整个扩展的能力边界：浏览器扩展只能通过 PAC 表达代理，而本项目已收敛为只支持
@@ -123,12 +142,32 @@ export function defaultProbeSettings() {
   };
 }
 
+/** @returns 全新的默认重试设置 */
+export function defaultRetrySettings() {
+  return {
+    /** 每张图最多尝试几个节点，**含首次**。1 = 不重试 */
+    maxAttempts: 3,
+    /**
+     * 重发前等多久。留一小段时间让 Chromium 把刚失败的代理登记进它自己的坏代理列表
+     * （见 docs/LIMITATIONS.md 第 5 节），否则重发很可能又落回同一个节点。
+     */
+    delayMs: 300,
+  };
+}
+
+/** @returns 全新的默认兜底图片代理设置 */
+export function defaultFallbackImage() {
+  return { enabled: false, template: '' };
+}
+
 /** @returns 全新的默认设置对象 */
 export function defaultSettings() {
   return {
     strategy: 'round-robin',
     fallback: 'direct',
     rotateEvery: 1,
+    retry: defaultRetrySettings(),
+    fallbackImage: defaultFallbackImage(),
     probe: defaultProbeSettings(),
     logLimit: 200,
     bypassList: [...DEFAULT_BYPASS_LIST],

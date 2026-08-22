@@ -98,3 +98,66 @@ test('未来版本号不崩溃，按当前版本尽力读取', () => {
   assert.equal(cfg.version, CONFIG_VERSION);
   assert.equal(cfg.enabled, true);
 });
+
+// ---------------------------------------------------------------- 重试与兜底设置
+
+test('默认配置带上重试与兜底，且兜底默认不启用', () => {
+  const s = normalizeConfig({}).settings;
+  assert.deepEqual(s.retry, { maxAttempts: 3, delayMs: 300 });
+  assert.deepEqual(s.fallbackImage, { enabled: false, template: '' });
+});
+
+test('重试次数与间隔被夹进合法区间', () => {
+  const tooBig = normalizeConfig({ settings: { retry: { maxAttempts: 999, delayMs: 999999 } } }).settings.retry;
+  assert.equal(tooBig.maxAttempts, 10, '上限存在是为了防止误配把一张裂图变成几十次重刷');
+  assert.equal(tooBig.delayMs, 5000);
+
+  const tooSmall = normalizeConfig({ settings: { retry: { maxAttempts: 0, delayMs: -1 } } }).settings.retry;
+  assert.equal(tooSmall.maxAttempts, 1, 'maxAttempts=1 就是「不重试」，没有比这更小的合法值');
+  assert.equal(tooSmall.delayMs, 0, '0 毫秒是合法的：用户可以选择不等');
+});
+
+test('重试设置缺失或是垃圾时回落到默认值', () => {
+  for (const retry of [undefined, null, 'x', [], { maxAttempts: 'abc' }]) {
+    const s = normalizeConfig({ settings: { retry } }).settings.retry;
+    assert.equal(s.maxAttempts, 3, `${JSON.stringify(retry)}`);
+  }
+});
+
+test('兜底模板合法时可以启用', () => {
+  const fb = normalizeConfig({
+    settings: { fallbackImage: { enabled: true, template: '  https://wsrv.nl/?url={url}  ' } },
+  }).settings.fallbackImage;
+  assert.equal(fb.enabled, true);
+  assert.equal(fb.template, 'https://wsrv.nl/?url={url}', '两端空白要去掉，否则 new URL 会失败');
+});
+
+test('模板非法时强制关闭，但保留用户填的文本', () => {
+  // 强制关闭是因为「开关开着、实际什么都不会发生」正是本项目反复吃过亏的那类静默失败；
+  // 保留文本是为了不把用户填了一半的东西抹掉，设置页会就地说明它为什么没被启用
+  for (const template of ['https://wsrv.nl/', 'ftp://x/{url}', '', 'not a url {url}']) {
+    const fb = normalizeConfig({ settings: { fallbackImage: { enabled: true, template } } }).settings.fallbackImage;
+    assert.equal(fb.enabled, false, `${template} 不该被启用`);
+    assert.equal(fb.template, template.trim(), '用户填的文本不该被抹掉');
+  }
+});
+
+test('兜底设置本身是垃圾时回落到默认值，不让整份配置失效', () => {
+  for (const fallbackImage of [undefined, null, 'x', 42, []]) {
+    const fb = normalizeConfig({ settings: { fallbackImage } }).settings.fallbackImage;
+    assert.deepEqual(fb, { enabled: false, template: '' });
+  }
+});
+
+test('重试与兜底设置能跟着配置导出再导入', () => {
+  const cfg = normalizeConfig({
+    settings: {
+      retry: { maxAttempts: 5, delayMs: 0 },
+      fallbackImage: { enabled: true, template: 'https://p.example/?u={raw}' },
+    },
+  });
+  const back = importConfig(exportConfig(cfg), normalizeConfig({}), { merge: false });
+  assert.deepEqual(back.settings.retry, { maxAttempts: 5, delayMs: 0 });
+  assert.equal(back.settings.fallbackImage.enabled, true);
+  assert.equal(back.settings.fallbackImage.template, 'https://p.example/?u={raw}');
+});

@@ -16,7 +16,10 @@
 │  │ controller   │ │ monitor       │ │ + auth-provider    │   │
 │  │ 编译并注入PAC │ │ 测速/自动禁用  │ │ 只读观测 + 认证应答 │   │
 │  └──────┬───────┘ └───────┬───────┘ └────────┬───────────┘   │
-│         └─────────────────┴──────────────────┘               │
+│         │                 │          ┌───────▼───────────┐   │
+│         │                 │          │ retry-coordinator │◄──┼── src/content/retry.js
+│         │                 │          │ 该不该换个代理重发 │   │   （页面里的执行端）
+│         └─────────────────┴──────────┴───────┬───────────┘   │
 │      state.js（配置缓存 + 运行时态）                           │
 │      metrics-store.js（统计计数器 + 节流落盘）                  │
 └─────────────────────────────┬────────────────────────────────┘
@@ -25,7 +28,7 @@
 │ src/lib/（纯 JS，零 chrome 依赖，全量单测）                    │
 │  constants  hash  schema  storage  ascii  pac-url             │
 │  node-parser  node-model  rule-matcher  scheduler             │
-│  pac-generator  logger  metrics                               │
+│  pac-generator  logger  metrics  retry  image-proxy           │
 └─────────────────────────────┬────────────────────────────────┘
                               │ 生成 PAC 字符串（纯 ASCII，只依赖 scheme+host+port）
 ┌─────────────────────────────▼────────────────────────────────┐
@@ -49,7 +52,7 @@
 | **D7** | PAC 生成器用 `node:vm` 沙箱**真的执行**生成出来的脚本来测 | 断言「脚本行为正确」而不是「字符串长得对」。字符串断言会在重构时全线崩溃 |
 | **D8** | 自动禁用**只由测速结果驱动**；线上请求失败仅记日志 | 图片 404、站点 5xx、用户断网都会造成请求失败，据此禁用节点会把好节点全禁掉 |
 | **D9** | 规则可绑定节点子集（空数组=全部） | 支持「A 图源用这批节点、B 图源用那批」；绑定的节点全不可用时自动回落到全部可用节点，避免图片直接裂开 |
-| **D10** | 兜底可配 `fallback: direct \| block`，默认 `direct` | 默认让图片「至少能加载」优于「彻底裂图」；追求严格分流的用户可切 `block` |
+| **D10** | 全部失败后的行为可配 `fallback: direct \| block`，默认 `direct` | 默认让图片「至少能加载」优于「彻底裂图」；追求严格分流的用户可切 `block`。注意 `direct` 会让重试与兜底图片代理整块失效（见 D20 与 [LIMITATIONS.md](LIMITATIONS.md) 第 15 节）—— 连不上代理时浏览器静默改走直连，图片正常显示、不派发 `error` |
 | **D11** | 零构建、零依赖、原生 ESM | clone 后直接「加载解压缩的扩展」即可，没有 node_modules 供应链风险 |
 | **D12** | 注入 PAC 时 `mandatory: false`，PAC 顶层 `try/catch` 兜底返回 `DIRECT` | 最坏结果是「不走代理」，绝不会是「整个浏览器断网」 |
 | **D13** | 生成的 PAC **必须是纯 ASCII**：注释只写英文，数据经 `asciiJson()` 转义，域名经 `toAsciiHost()` 转 Punycode | `chrome.proxy` 会因为一个非 ASCII 字节就**整体**拒绝 `pacScript.data`，而拒绝之后浏览器照旧直连、图片照样加载 —— 故障表现为「扩展安静地什么都没做」，极难自查。见 [LIMITATIONS.md](LIMITATIONS.md) 第 11 节 |
@@ -59,6 +62,11 @@
 | **D17** | 「命中规则」与「真的走代理」是**两个不同的量**，统计里分别记为 `total` 与 `routed`，差值单列为 `blind` | 这两个量在 1.2.0 里是同一个数字，于是统计成了故障的帮凶而不是线索。分开之后，`blind` 不为零就直接指向「有规则写成了 PAC 判定不了的形态」 |
 | **D18** | 归因**只在对端 IP 唯一指向一个节点时**才落到该节点；匹配到多个就计入 `unattributed` 并说明原因。另设 `viaNodeIp` 回答「是不是真从代理回来的」 | `webRequest` 只给对端 IP，不给端口。而「一台机器几十个端口、每个端口一个出口」是最常见形态，这种配置下节点的 `host` 全都相同。取第一个匹配会把全部用量记到列表里第一个节点上，面板显示「1 个节点 100%、其余全 0」，看起来像轮询坏了 —— 分不出来就该说分不出来。见 [LIMITATIONS.md](LIMITATIONS.md) 第 13 节 |
 | **D19** | 测速全程持一把**互斥锁**，重复触发直接拒绝 | 串行定向之后一份 PAC 只能指向一个节点，两轮测速重叠时后一轮会覆盖前一轮的定向，「测 A 的请求」实际走了 B。而串行测速可能要跑几十秒，用户重复点击很正常 —— 宁可明确拒绝，也不要给出一个错的延迟 |
+| **D20** | 重试 = **内容脚本重新给 `<img>` 赋值 `src`**，而不是让 PAC 返回一串代理 | PAC 可以返回 `PROXY a; PROXY b; DIRECT` 让浏览器自己往下试，但那样 a 挂掉时它名下的**全部**流量都会压到 b 上，而 PAC 的轮询计数器根本不知道发生过失败，下一个请求的链首恰好也是 b —— b 干两份活。这个扩展存在的唯一理由就是把请求摊到多个 IP 上，链式兜底偏偏在最需要均匀的时候破坏均匀性。重新发一次请求会触发一次新的 `FindProxyForURL`：轮询下标已经前进，而 Chromium 自带的坏代理列表也已经把刚连不上的那个排除掉了（第 5 节）。于是「跳过已经试过的代理」不需要在扩展里维护任何状态 |
+| **D21** | 该不该重试**只在后台判定**，内容脚本一条规则都不持有 | 规则匹配、失败原因分类、次数上限全在 SW 一处。页面侧存一份规则副本的话，规则一改副本就过期，而过期的表现是「重试悄悄按旧规则在跑」—— 与 UI「不维护第二份状态」是同一条纪律 |
+| **D22** | 重试只针对**代理层与连接层失败**；HTTP 4xx / 5xx 一律不重试 | 换个代理拿到的还是同一个 404，重发只是白给图源添一次请求。内容脚本只看得到「图裂了」，真正的原因在 `request-logger` 的失败原因表里（按 URL 暂存 30 秒）。查不到就保守放弃 —— `onErrorOccurred` 与渲染进程派发 `error` 没有顺序保证，宁可少救一张图 |
+| **D23** | 兜底是 **URL 改写型图片代理**，不是 HTTP 代理；**且它的域名自动进绕过列表** | HTTP 代理只能通过 PAC 表达，而 PAC 里的兜底会在重试**之前**生效：连接失败被浏览器当场切到兜底并成功，图片根本不派发 `error`，「先换几个轮询节点」那一段永远执行不到 —— 兜底从「最后一道防线」变成了「第二个选项」。URL 改写逐请求生效，顺序正确，且不碰全局代理设置、不与测速抢那把锁（D19）。自动绕过是必要的：兜底存在的前提就是轮询池已经不好使了，而一条宽泛的规则完全可能恰好命中兜底服务的域名，那样最后一道防线会跟着一起挂 |
+| **D24** | 重试统计**只记内容脚本回报的观测值** | `retry.recovered` 是「重发之后真的收到了 load 事件」，不是「大概成功了」。同时必须明说重试会抬高 `requests.total` —— 重发就是一次新请求，`webRequest` 会照实再记一笔，于是成功率会比不开重试时低 |
 
 ---
 
@@ -70,7 +78,7 @@
 3. PAC 依次判断：
    1. 有测速定向且 URL 属于测速地址所在源 → 强制返回该节点的 token（无兜底，见 D3）
    2. 总开关关闭 → `DIRECT`
-   3. 主机命中绕过列表 / 单段主机名 / 私有网段 → `DIRECT`
+   3. 主机命中绕过列表（含自动加入的兜底服务域名，见 D23）/ 单段主机名 / 私有网段 → `DIRECT`
    4. 逐条匹配规则池：先按规则字面语义匹配，未命中且 URL 被净化过时再试一次退化形式；
       命中则取出该规则对应的节点 token 数组
    5. 用模块作用域的计数器取一个 token，按 `rotateEvery` 决定是否前进
@@ -81,6 +89,47 @@
    `matchUrl()` 回答「用户想代理它吗」。前者不中、后者中的记为 `blind`（决策 D17）。
    归因按对端 IP 反查节点，唯一命中才落到该节点；多个节点共用地址时只记 `viaNodeIp`（决策 D18）。
 6. 状态弹窗每 2 秒拉一次日志与统计并刷新展示；设置页只在「统计」那一屏可见时每 5 秒拉一次。
+
+---
+
+## 一张图裂了之后（重试链，决策 D20–D24）
+
+```
+① 节点 A 连不上 → 浏览器在 <img> 上派发 error
+        │
+        │ src/content/retry.js 在 document 捕获阶段收到（error 不冒泡，只能这样挂）
+        ▼
+② 问后台 imageRetryAsk{url, attempt}
+        │
+        │ retry-coordinator 凑齐三件事：
+        │   · matchPacUrl() —— 这张图真的是本扩展路由出去的吗
+        │   · observedFailure() —— webRequest 看到的失败原因（表里查不到就等 150ms 再查）
+        │   · settings.retry / settings.fallbackImage
+        │ 判定本身在 lib/retry.js（纯函数）
+        ▼
+③ ├─ 不匹配规则               → give-up，**不计数**（别人网站的裂图不该进你的统计）
+  ├─ 原因是 404 / 原因不明   → give-up，计入 retry.skipped
+  ├─ attempt < maxAttempts   → retry，计入 retry.attempted
+  └─ attempt >= maxAttempts  → 有兜底则 fallback，否则 give-up；两者都计入 retry.exhausted
+        │
+        ▼
+④ 内容脚本等 delayMs（默认 300ms，让 Chromium 把坏代理登记进它自己的列表），然后
+   · retry    → img.src = img.src（同值赋值也会触发全新请求，**不加缓存穿透参数**）
+   · fallback → 清掉 srcset 与兄弟 <source>，把 src 换成 模板(原图地址)
+        │
+        ▼
+⑤ 新请求 → 浏览器重新调用 FindProxyForURL → 轮询下标已前进 → 节点 B
+        │
+        ▼
+⑥ load  → imageRetryResult{ok:true}  → retry.recovered / fallbackImage.ok
+   error → imageRetryResult{ok:false} → 回到 ②（兜底自己失败时到此为止，不再套娃）
+```
+
+**一个请求始终只挂一个代理**，所以重试不会让轮询变得不均匀 —— 这正是不用 PAC 代理列表的原因（D20）。
+
+**页面侧有两道刹车**：单页最多重试 500 次（触顶会上报一次，写进活动日志，不悄悄停下）；
+同时挂起的询问不超过 16 个。后台侧还有一道：同一域名的重试日志每分钟只写一行，
+次数去统计里看 —— 不然一个漫画页几秒就能把环形日志冲干净。
 
 ---
 
@@ -130,13 +179,26 @@ Rule {
 
 Settings {
   strategy: 'round-robin'|'hash',
-  fallback: 'direct'|'block',
+  fallback: 'direct'|'block',      // 全部失败后：直连原图 / 不直连
   rotateEvery: number,
+  retry: {
+    maxAttempts: number,           // 每张图最多尝试几个节点，**含首次**。1 = 不重试
+    delayMs: number,               // 重发前等多久（给坏代理列表留登记时间）
+  },
+  fallbackImage: {                 // 兜底图片代理（URL 改写型，决策 D23）
+    enabled: boolean,              // 模板非法时规范化会强制置 false
+    template: string,              // 例如 https://wsrv.nl/?url={url}
+  },
   probe: { url, timeoutMs, intervalMinutes, autoDisable, failureThreshold, recoverProbe },
   logLimit: number,
   bypassList: string[],
 }
 ```
+
+**`fallback: 'direct'` 与重试是互斥的。** 选「直连原图」时，代理连不上会被浏览器静默改走
+直连 —— 图片正常显示、不派发 `error`，于是内容脚本什么都收不到，重试与兜底代理一次都不会
+触发，而真实 IP 已经交给图源了。设置页对这个组合有一条常亮的告警（`renderRetryWarning()`），
+新装默认仍是 `direct`（安全优先，D12），不替用户偷偷改。
 
 运行时状态（日志、轮询起点、控制权）存 `chrome.storage.session`，丢了不影响功能。
 
@@ -155,10 +217,24 @@ Metrics {
   perNode: { [nodeId]: { used, ok, fail } },
   perRule: { [ruleId]: { hits } },   // 只记真的路由出去的命中
   retired: { nodeUsed, nodeOk, nodeFail, ruleHits },  // 已删除实体的历史量
+
+  // 重试（决策 D24）。全是内容脚本回报的观测值，没有一个是推断出来的
+  retry: {
+    attempted,   // 判定为重发，页面真的重新赋值了 src
+    recovered,   // 重发之后收到了 load —— 不是「大概成功了」
+    exhausted,   // 用尽 maxAttempts 仍失败（不论后面有没有兜底接手）
+    skipped,     // 不该重试：不归本扩展管 / 原因不是代理故障 / 查不到原因
+  },
+  fallbackImage: { used, ok, fail },  // 改写地址时记 used，加载完再补成败
+
   probe:  { ok, fail, lastAt },
   apply:  { ok, fail, lastAt, lastError },
 }
 ```
+
+**开启重试会抬高 `requests.total`。** 重发就是一次全新的请求，`webRequest` 会照实再记一笔，
+所以成功率会比不开重试时低。`retry.attempted` 就是用来对账的，这句话也写在了统计页上 ——
+统计口径变了却不说，比数字难看得多。
 
 **为什么有 `retired`（决策 D14）。** 节点或规则被删掉后，它的键会在落盘前被剪掉，
 量并入 `retired`。这同时解决两个问题：
@@ -193,14 +269,18 @@ Metrics {
 | `lib/pac-generator.js` | 把配置编译成 PAC 脚本字符串（保证纯 ASCII） |
 | `lib/logger.js` | 环形日志缓冲 |
 | `lib/metrics.js` | 统计计数器：累加、剪枝、汇总成视图模型（纯逻辑） |
+| `lib/retry.js` | 失败原因分类与重试判定（纯函数，决策 D22） |
+| `lib/image-proxy.js` | 兜底图片代理的模板校验与 URL 改写（纯函数，决策 D23） |
 | `background/state.js` | 配置缓存与运行时态 |
 | `background/metrics-store.js` | 统计的持久化：节流落盘 + 落盘前剪枝 |
 | `background/proxy-controller.js` | 全扩展唯一写浏览器代理设置的地方 |
 | `background/health-monitor.js` | 测速、超时判定、自动禁用、定时任务 |
-| `background/request-logger.js` | 只读观测请求结果，并把结果计入统计 |
+| `background/request-logger.js` | 只读观测请求结果，计入统计，并按 URL 暂存失败原因供重试判定查询 |
+| `background/retry-coordinator.js` | 内容脚本的唯一对话人：凑齐入参、调用判定、写统计与日志（决策 D21） |
 | `background/auth-provider.js` | 代理认证自动应答 |
-| `background/messaging.js` | UI 与后台之间唯一的契约 |
+| `background/messaging.js` | UI / 内容脚本与后台之间唯一的契约 |
 | `background/service-worker.js` | 事件注册与启动流程 |
+| `content/retry.js` | 页面侧执行端：捕获 `<img>` 的 error、问后台、重新赋值 `src`、回报结果。**classic script，不能有 import**（MV3 的 content_scripts 不支持 ESM） |
 
 **一条纪律**：任何改动了节点、规则、开关或健康状态的代码路径，结束前都必须调用
 `applyProxy()`，否则 PAC 里的节点池会和实际配置脱节。
@@ -210,7 +290,7 @@ Metrics {
 ## 测试策略
 
 ```bash
-npm test    # 308 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
+npm test    # 409 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
 npm run check
 ```
 
@@ -218,11 +298,12 @@ npm run check
 
 | 层 | 文件 | 手法 |
 |---|---|---|
-| 纯逻辑单元 | `tests/{storage,node-parser,node-model,rule-matcher,scheduler,logger,ascii,metrics,pac-url}.test.js` | 直接调 `src/lib/`，零依赖 |
+| 纯逻辑单元 | `tests/{storage,node-parser,node-model,rule-matcher,scheduler,logger,ascii,metrics,pac-url,retry,image-proxy}.test.js` | 直接调 `src/lib/`，零依赖 |
 | PAC 行为 | `tests/pac-generator.test.js` | `node:vm` 沙箱**真的执行**生成的脚本 |
+| 内容脚本行为 | `tests/content-retry.test.js` | `node:vm` 沙箱 + 约 50 行 DOM 替身，**真的执行**内容脚本 |
 | 主链路集成 | `tests/integration.test.js` | 从「用户粘贴的文本」一路跑到「PAC 做出路由决策」 |
-| 后台编排 | `tests/background.test.js`、`tests/service-worker.test.js` | `tests/helpers/chrome-stub.js` 提供 `chrome.*` 与 `fetch` 替身 |
-| UI 契约 | `tests/ui-{tokens,contract,status,components}.test.js` | 静态解析 CSS/HTML/JS；组件构造器用极小 DOM 替身 |
+| 后台编排 | `tests/background.test.js`、`tests/retry-coordinator.test.js`、`tests/service-worker.test.js` | `tests/helpers/chrome-stub.js` 提供 `chrome.*` 与 `fetch` 替身 |
+| UI 契约 | `tests/ui-{tokens,contract,status,components,density}.test.js` | 静态解析 CSS/HTML/JS；组件构造器用极小 DOM 替身 |
 | 打包产物 | `tests/pack.test.js` | 用另写一份的 zip 解析器把包拆回来逐字节比对 |
 
 **一条不可违反的纪律（决策 D16 的教训）**：任何调用 `FindProxyForURL` 的断言都必须先经
@@ -250,13 +331,15 @@ UI 这一层大部分没有 DOM 环境，所以只测**能静态判定、且出�
   attribute，条子会永远是空的而页面不报任何错。
 
 `npm run check` 做的静态校验：
-1. `manifest.json` 合法且是 MV3，引用的每个文件真实存在
+1. `manifest.json` 合法且是 MV3，引用的每个文件真实存在（含 `content_scripts`）
 2. `src/` 下所有相对 `import` 路径都能解析
 3. **命名导入必须真的被目标模块导出**（删除/重命名导出时最容易留下悬空导入，
    而浏览器只会静默不启动 SW）
 4. `src/lib/` 里没有 `chrome.*`（守护 D6）
-5. **UI 发出的每个消息类型都有对应的后台 handler**（契约只靠字符串维系，写错浏览器不报错）
+5. **UI 与内容脚本发出的每个消息类型都有对应的后台 handler**（契约只靠字符串维系，写错浏览器不报错）
 6. HTML 引用的 css/js 都存在
+7. **内容脚本里没有 `import` / `export`** —— MV3 的 `content_scripts` 不支持 ESM，
+   有一句就整个脚本注入失败，而失败的表现是「重试功能安静地不生效」
 
 最关键的测试是 `tests/pac-generator.test.js`：它用 `node:vm` 建沙箱、注入 PAC 内置函数的桩，
 然后**真的执行**生成出来的脚本，逐项断言轮询顺序、测速路由、禁用节点被跳过、

@@ -69,6 +69,19 @@ test('collectFiles 只收 manifest 与 src，不带进任何开发用文件', ()
   assert.deepEqual(names, [...names].sort(), '必须按路径排序，否则产物不可复现');
 });
 
+test('manifest 引用的每个文件都必须在包内，content_scripts 也算', () => {
+  // 内容脚本漏进包里的后果是「装上之后重试功能整块不存在」，
+  // 而浏览器只会静默不注入、不报错 —— 只有这道断言拦得住
+  const names = collectFiles(ROOT).map((f) => f.name);
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8'));
+  const scripts = (manifest.content_scripts ?? []).flatMap((e) => e.js ?? []);
+
+  assert.ok(scripts.length > 0, 'manifest 应当声明内容脚本');
+  for (const path of scripts) {
+    assert.ok(names.includes(path), `content_scripts 里的 ${path} 不在包内`);
+  }
+});
+
 test('zip 能被独立解析，且内容与源文件逐字节一致', () => {
   const entries = collectFiles(ROOT);
   const parsed = readZip(buildZip(entries));

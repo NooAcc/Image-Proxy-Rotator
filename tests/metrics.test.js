@@ -19,6 +19,8 @@ import {
   noteRequest,
   noteProbe,
   noteApply,
+  noteRetry,
+  noteFallbackImage,
   pruneMetrics,
   summarizeMetrics,
 } from '../src/lib/metrics.js';
@@ -36,6 +38,8 @@ test('emptyMetrics 每次都是新对象，字段齐全且全为零', () => {
   assert.deepEqual(a.requests, { total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0, unattributed: 0, blind: 0, viaNodeIp: 0 });
   assert.deepEqual(a.perNode, {});
   assert.deepEqual(a.perRule, {});
+  assert.deepEqual(a.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 });
+  assert.deepEqual(a.fallbackImage, { used: 0, ok: 0, fail: 0 });
   assert.deepEqual(a.retired, { nodeUsed: 0, nodeOk: 0, nodeFail: 0, ruleHits: 0 });
   assert.deepEqual(a.probe, { ok: 0, fail: 0, lastAt: null });
   assert.deepEqual(a.apply, { ok: 0, fail: 0, lastAt: null, lastError: null });
@@ -300,4 +304,92 @@ test('normalizeMetrics 之后立刻能继续计数', () => {
   const m = normalizeMetrics({ requests: { total: 3 } });
   noteRequest(m, { ok: true, nodeId: 'n_a', at: 9 });
   assert.equal(m.requests.total, 4);
+});
+
+// ---------------------------------------------------------------- 重试与兜底
+
+test('noteRetry 四个口径互不重叠', () => {
+  const m = emptyMetrics();
+  noteRetry(m, { kind: 'attempted', at: 1000 });
+  noteRetry(m, { kind: 'attempted' });
+  noteRetry(m, { kind: 'recovered' });
+  noteRetry(m, { kind: 'exhausted' });
+  noteRetry(m, { kind: 'skipped' });
+
+  assert.deepEqual(m.retry, { attempted: 2, recovered: 1, exhausted: 1, skipped: 1 });
+  assert.equal(m.since, 1000, '第一次重试判定也该点亮 since');
+});
+
+test('noteRetry 对未知口径与脏输入无动于衷，不会凭空长出字段', () => {
+  const m = emptyMetrics();
+  for (const kind of ['nonsense', 'constructor', '__proto__', 'toString', undefined, 42]) {
+    noteRetry(m, { kind });
+  }
+  noteRetry(m);
+  assert.deepEqual(m.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 });
+});
+
+test('兜底的 used 与 ok/fail 是两个时刻，可以先记 used 后补成败', () => {
+  const m = emptyMetrics();
+  noteFallbackImage(m, { used: true, at: 5000 });
+  noteFallbackImage(m, { used: true });
+  assert.deepEqual(m.fallbackImage, { used: 2, ok: 0, fail: 0 }, '还没加载完时只有 used');
+
+  noteFallbackImage(m, { ok: true });
+  noteFallbackImage(m, { ok: false });
+  assert.deepEqual(m.fallbackImage, { used: 2, ok: 1, fail: 1 });
+});
+
+test('兜底的 ok 缺省是 null，不会被当成 false 记成失败', () => {
+  // {used:true} 只表示「改写了地址」，此刻结果还不知道。把缺省当失败会让
+  // 兜底成功率永远显示 0%
+  const m = emptyMetrics();
+  noteFallbackImage(m, { used: true });
+  assert.equal(m.fallbackImage.fail, 0);
+});
+
+test('normalizeMetrics 读回新计数器，缺字段补零、脏值归零', () => {
+  const m = normalizeMetrics({
+    retry: { attempted: 7, recovered: '3', exhausted: -1, skipped: NaN },
+    fallbackImage: { used: 2.6, ok: 1 },
+  });
+  assert.deepEqual(m.retry, { attempted: 7, recovered: 3, exhausted: 0, skipped: 0 });
+  assert.deepEqual(m.fallbackImage, { used: 3, ok: 1, fail: 0 });
+});
+
+test('旧版存储里没有这两个桶时读回全零，而不是 undefined', () => {
+  // 用户从旧版本升上来时存储里只有 requests / perNode，读回来必须是能直接继续累加的形状
+  const m = normalizeMetrics({ requests: { total: 5, ok: 5 } });
+  assert.deepEqual(m.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0 });
+  assert.deepEqual(m.fallbackImage, { used: 0, ok: 0, fail: 0 });
+});
+
+test('summarizeMetrics 给出重试救回率与兜底成功率；分母为 0 时是「无」', () => {
+  const empty = summarizeMetrics(emptyMetrics());
+  assert.equal(empty.retry.recoveryRate, null, '一次都没重试过时不该显示 0%');
+  assert.equal(empty.fallbackImage.successRate, null);
+
+  const m = emptyMetrics();
+  for (let i = 0; i < 4; i++) noteRetry(m, { kind: 'attempted' });
+  noteRetry(m, { kind: 'recovered' });
+  noteRetry(m, { kind: 'exhausted' });
+  noteFallbackImage(m, { used: true });
+  noteFallbackImage(m, { ok: true });
+  noteFallbackImage(m, { ok: false });
+
+  const view = summarizeMetrics(m);
+  assert.equal(view.retry.attempted, 4);
+  assert.equal(view.retry.recoveryRate, 25);
+  assert.equal(view.retry.exhausted, 1);
+  assert.equal(view.fallbackImage.used, 1);
+  assert.equal(view.fallbackImage.successRate, 50);
+});
+
+test('剪枝不碰重试与兜底 —— 它们不是按实体分桶的', () => {
+  const m = emptyMetrics();
+  noteRetry(m, { kind: 'attempted' });
+  noteFallbackImage(m, { used: true });
+  pruneMetrics(m, { nodeIds: [], ruleIds: [] });
+  assert.equal(m.retry.attempted, 1);
+  assert.equal(m.fallbackImage.used, 1);
 });

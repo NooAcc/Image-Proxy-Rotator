@@ -71,6 +71,9 @@ function manifestRefs(manifest) {
     manifest.action?.default_popup,
     ...Object.values(manifest.icons ?? {}),
     ...Object.values(manifest.action?.default_icon ?? {}),
+    // 内容脚本漏进包里的后果是「装上之后重试功能整块不存在」，
+    // 而浏览器只会静默不注入，不报错
+    ...(manifest.content_scripts ?? []).flatMap((entry) => [...(entry.js ?? []), ...(entry.css ?? [])]),
   ].filter(Boolean);
 }
 

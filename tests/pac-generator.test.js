@@ -410,3 +410,49 @@ test('对抗配置下脚本仍可执行且行为正常', () => {
   assert.equal(pac.find(...browserUrl('https://xn--v6q792i.local/a.jpg')), 'DIRECT',
     '绕过列表里的中文域名转码后应生效');
 });
+
+// ---------------------------------------------------------------- 兜底图片代理
+
+/** 一条故意写得很宽、会命中兜底服务域名的规则 */
+const WIDE = rule({ type: 'regex', pattern: '^https?://' });
+
+test('启用兜底时，兜底服务的域名被自动加进绕过列表', () => {
+  // 兜底存在的前提就是「轮询节点都不好使了」。这时候再把取兜底图的请求送进同一个
+  // 坏池子，等于让最后一道防线跟着一起挂。而用户完全可能写出一条宽泛的规则，
+  // 恰好命中兜底服务的域名 —— 那种失效很难自查，不如在生成器里直接钉死
+  const config = cfg({ rules: [WIDE] });
+  config.settings.fallbackImage = { enabled: true, template: 'https://wsrv.nl/?url={url}' };
+  const pac = loadPac(generatePac(config));
+
+  assert.equal(pac.find(...browserUrl('https://wsrv.nl/?url=x')), 'DIRECT',
+    '兜底服务必须绕过轮询池，否则代理全挂时它也取不到图');
+  assert.match(pac.find(...MANGA), /^PROXY /, '别的域名照旧走代理');
+});
+
+test('兜底没启用时不动绕过列表', () => {
+  const config = cfg({ rules: [WIDE] });
+  config.settings.fallbackImage = { enabled: false, template: 'https://wsrv.nl/?url={url}' };
+  assert.match(loadPac(generatePac(config)).find(...browserUrl('https://wsrv.nl/?url=x')), /^PROXY /);
+});
+
+test('模板非法时不会往绕过列表里塞一个 null', () => {
+  const config = cfg({ rules: [WIDE] });
+  config.settings.fallbackImage = { enabled: true, template: 'https://wsrv.nl/' };
+  const pac = generatePac(config);
+  assert.ok(!/null/.test(pac.slice(pac.indexOf('"bypass"'), pac.indexOf('"privates"'))),
+    '绕过列表里不该出现 null');
+  assert.match(loadPac(pac).find(...browserUrl('https://wsrv.nl/x')), /^PROXY /);
+});
+
+test('兜底域名是中文时进绕过列表的是 Punycode 形式', () => {
+  // 一个非 ASCII 字节就会让整份 PAC 被浏览器拒收（决策 D13）。
+  // 期望值不写死：Punycode 由 new URL() 算，测试跟着算一遍，免得手写错一个字母
+  const config = cfg({ rules: [WIDE] });
+  config.settings.fallbackImage = { enabled: true, template: 'https://图床.com/?url={url}' };
+  const pac = generatePac(config);
+  const punycode = new URL('https://图床.com/').hostname;
+
+  assert.ok(isAscii(pac), '生成的 PAC 必须是纯 ASCII');
+  assert.match(punycode, /^xn--/, '前提：这个域名确实需要转码');
+  assert.equal(loadPac(pac).find(...browserUrl(`https://${punycode}/?url=x`)), 'DIRECT');
+});

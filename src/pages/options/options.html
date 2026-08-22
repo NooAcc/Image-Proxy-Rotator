@@ -75,6 +75,26 @@
         <dl class="kpis" id="requestKpis"></dl>
       </section>
 
+      <!--
+        重试与兜底单独一张卡，不并进「请求统计」。
+        它们回答的是另一个问题：「代理挂了之后有没有被救回来」。而且这里有一处口径必须
+        当场讲清 —— 重发是一次全新的请求，会让上面那张卡的总量变大、成功率变低。
+        那句话是条件不成立时也成立的「参考类」，所以进折叠区（见 tests/ui-density）。
+      -->
+      <section class="card">
+        <div class="card__head"><h2>重试与兜底</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>为什么开了重试之后成功率会变低</summary>
+          <div class="card__help__body">
+            <p>重发是一次<strong>全新的请求</strong>，会被如实计进上面「请求统计」的总量里。
+              所以开启重试之后总量变大、成功率变低是正常的 —— 用「重试」这一格来对账。</p>
+            <p>「重试救回」是重发之后真的加载成功了，不是估算。「兜底接管」是轮询节点全试过之后
+              改用兜底图片代理的次数。</p>
+          </div>
+        </details>
+        <dl class="kpis" id="retryKpis"></dl>
+      </section>
+
       <section class="card">
         <div class="card__head"><h2>节点使用分布</h2></div>
         <details class="card__help">
@@ -294,13 +314,6 @@
             </select>
           </div>
           <div class="field field--inline">
-            <label class="field__label" for="fallback">无可用节点时</label>
-            <select id="fallback">
-              <option value="direct">直连（图片至少能加载）</option>
-              <option value="block">不兜底（严格只走代理）</option>
-            </select>
-          </div>
-          <div class="field field--inline">
             <label class="field__label" for="rotateEvery">每几个请求换节点</label>
             <div class="field__control">
               <input type="number" id="rotateEvery" min="1" max="1000">
@@ -308,6 +321,69 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <!--
+        重试与兜底。
+        这张卡里的三件事是有先后的：先换节点重发，再交给兜底图片代理，最后才是「直连还是裂图」。
+        「全部失败后」选直连会让前两步整块失效（图片静默走直连、不派发 error），
+        所以那个组合必须有一条条件 banner 明确说出来 —— 交给 renderRetryWarning()。
+      -->
+      <section class="card">
+        <div class="card__head"><h2>重试与兜底</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>重试是怎么做到的，能救回哪些图</summary>
+          <div class="card__help__body">
+            <p>代理连不上时，扩展让页面把这张图<strong>重新请求一次</strong>。新请求会落到轮询里的
+              下一个节点，刚失败的那个已被浏览器自己排除。一个请求始终只挂一个代理，
+              所以轮询不会因为重试而变得不均匀。</p>
+            <p>只有 <code>&lt;img&gt;</code> 救得回来。CSS 背景图、canvas、以及页面自己用脚本取图再塞进
+              <code>&lt;img&gt;</code> 的阅读器不派发可捕获的错误事件，这类图片救不到。</p>
+            <p>图源返回 404 / 5xx 时<strong>不</strong>重试：换个代理拿到的还是同一个结果。</p>
+            <p>兜底图片代理是按地址取图的服务（如 wsrv.nl、imgproxy、自建 Worker），
+              用 <code>{url}</code> 放原图地址（已编码），要求不编码的服务用 <code>{raw}</code>。
+              <strong>它会拿到你的图片地址</strong>，用公共服务等于交给第三方。</p>
+          </div>
+        </details>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="retryAttempts">每张图最多尝试</label>
+            <div class="field__control">
+              <input type="number" id="retryAttempts" min="1" max="10">
+              <span class="field__unit">个节点（含首次，1 = 不重试）</span>
+            </div>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="retryDelay">重发前等待</label>
+            <div class="field__control">
+              <input type="number" id="retryDelay" min="0" max="5000" step="50">
+              <span class="field__unit">毫秒</span>
+            </div>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="fallback">全部失败后</label>
+            <select id="fallback">
+              <option value="direct">直连原图（图能显示，但暴露真实 IP）</option>
+              <option value="block">不直连（重试与兜底才会生效）</option>
+            </select>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="fallbackImageTemplate">兜底图片代理</label>
+            <input type="text" id="fallbackImageTemplate" spellcheck="false"
+              placeholder="https://wsrv.nl/?url={url}">
+          </div>
+        </div>
+        <div class="banner banner--warn" id="retryWarning" hidden></div>
+        <div class="stack">
+          <label class="check"><input type="checkbox" id="fallbackImageEnabled"> 启用兜底图片代理</label>
+        </div>
+        <div class="btn-row">
+          <label class="sr-only" for="fallbackImageProbe">用来试算的图片地址</label>
+          <input type="text" id="fallbackImageProbe" spellcheck="false"
+            placeholder="填一个图片 URL，看它会被改写成什么">
+          <button type="button" class="btn" id="btnTestFallbackImage">试一下</button>
+        </div>
+        <div class="banner banner--info" id="fallbackImageResult" hidden></div>
       </section>
 
       <section class="card">

@@ -269,8 +269,30 @@ function renderMetrics(box) {
       }),
     )));
 
-  const usedNodes = metrics.nodes.rows.filter((r) => r.used > 0).slice(0, TOP_N);
-  box.append(section(`节点用量${metrics.nodes.rows.length > TOP_N ? `（前 ${TOP_N}）` : ''}`,
+  // 重试单独一段：它回答的是「代理挂了之后有没有被救回来」。
+  // 一格都不显示的话，用户在弹窗里看到的成功率会莫名其妙地比以前低 ——
+  // 重发是一次全新的请求，会被如实计进上面的总量
+  const retry = metrics.retry;
+  const fb = metrics.fallbackImage;
+  box.append(section('重试与兜底',
+    el('dl', { class: 'kpis' },
+      kpi({ label: '重试', value: retry.attempted, unit: '次' }),
+      kpi({
+        label: '救回',
+        value: retry.recovered,
+        unit: '次',
+        tone: retry.attempted > 0 && retry.recovered === 0 ? 'warn' : 'ok',
+      }),
+      kpi({
+        label: '用尽仍失败',
+        value: retry.exhausted,
+        unit: '次',
+        tone: retry.exhausted > 0 ? 'err' : '',
+      }),
+      kpi({ label: '兜底接管', value: fb.used, unit: '次' }),
+    )));
+
+  const usedNodes = metrics.nodes.rows.filter((r) => r.used > 0).slice(0, TOP_N);  box.append(section(`节点用量${metrics.nodes.rows.length > TOP_N ? `（前 ${TOP_N}）` : ''}`,
     usedNodes.length === 0
       ? el('p', { class: 'empty', text: '还没有请求被归因到具体节点。' })
       : el('div', { class: 'ranks' }, ...usedNodes.map((r) => rankRow(r.name, r.used, r.share, !r.exists))),

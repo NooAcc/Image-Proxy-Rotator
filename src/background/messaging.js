@@ -13,11 +13,13 @@ import { getConfig, setConfig, updateConfig, getLogger, getRuntime, saveRuntime 
 import { applyProxy, readControl, previewPac } from './proxy-controller.js';
 import { metricsView, resetMetrics as clearMetrics, flushMetrics } from './metrics-store.js';
 import { probeNode as runProbeNode, probeAll as runProbeAll, scheduleProbeAlarm, resetNodeState as runResetNodeState } from './health-monitor.js';
+import { planRetry, noteRetryOutcome } from './retry-coordinator.js';
 import { decodeSubscription, parseNodeList } from '../lib/node-parser.js';
 import { createNode, dedupeNodes, nodeWarnings, unsupportedNodes, isSelectable } from '../lib/node-model.js';
 import { createRule, validateRule, ruleWarnings } from '../lib/rule-matcher.js';
 import { exportConfig as serializeConfig, importConfig as deserializeConfig } from '../lib/storage.js';
 import { pacSummary } from '../lib/pac-generator.js';
+import { validateTemplate, rewriteImageUrl, templateOrigin } from '../lib/image-proxy.js';
 import { UNSUPPORTED_PROTOCOL_MESSAGE } from '../lib/constants.js';
 
 /** 给 UI 用的节点盘点快照。注意这里只回答「有多少节点、什么状态」，不含流量统计 */
@@ -319,6 +321,33 @@ const handlers = {
   async getPacPreview() {
     const { pac, summary } = await previewPac();
     return { ok: true, pac, summary };
+  },
+
+  /**
+   * 内容脚本：一张图加载失败了，接下来怎么办。
+   *
+   * 这是页面与后台之间唯一的「决定」型消息。规则匹配与次数上限都在后台（决策 D21），
+   * 页面侧不持有任何规则副本。
+   */
+  async imageRetryAsk({ url, attempt }) {
+    const plan = await planRetry({ url, attempt });
+    return { ok: true, ...plan };
+  },
+
+  /** 内容脚本：重发或兜底的结果。`retry.recovered` 唯一的来源 */
+  async imageRetryResult({ url, kind, ok }) {
+    return noteRetryOutcome({ url, kind, ok });
+  },
+
+  /** 兜底模板的即时校验与预览，设置页的「试一下」按钮用 */
+  async previewFallbackImage({ template, url }) {
+    const check = validateTemplate(template);
+    if (!check.ok) return { ok: false, error: check.reason };
+    const rewritten = rewriteImageUrl(template, url);
+    if (!rewritten) {
+      return { ok: false, error: '请填一个 http:// 或 https:// 的图片地址（且不能是兜底服务自己的地址）' };
+    }
+    return { ok: true, url: rewritten, origin: templateOrigin(template) };
   },
 };
 

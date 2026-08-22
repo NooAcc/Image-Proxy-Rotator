@@ -68,6 +68,24 @@ if (manifest) {
   for (const permission of required) {
     if (!manifest.permissions?.includes(permission)) fail(`manifest.permissions 缺少 "${permission}"`);
   }
+
+  // content_scripts：路径笔误的后果是「重试功能整块静默失效」，浏览器不会报错
+  for (const [index, entry] of (manifest.content_scripts ?? []).entries()) {
+    for (const path of entry.js ?? []) mustExist(path, `content_scripts[${index}].js`);
+    for (const path of entry.css ?? []) mustExist(path, `content_scripts[${index}].css`);
+    if (!Array.isArray(entry.matches) || entry.matches.length === 0) {
+      fail(`content_scripts[${index}] 缺少 matches`);
+    }
+    // 内容脚本不是模块（MV3 不支持），所以里面出现 import 语句会让整个脚本注入失败
+    for (const path of entry.js ?? []) {
+      const full = join(ROOT, path);
+      if (!existsSync(full)) continue;
+      const source = readFileSync(full, 'utf8');
+      if (/^\s*(?:import|export)\s/m.test(source)) {
+        fail(`${path} 是 content script，不能含 import/export —— MV3 的 content_scripts 不支持 ESM`);
+      }
+    }
+  }
 }
 
 // ---- 工具：递归列出文件 ----
@@ -158,8 +176,8 @@ for (const file of walk(join(ROOT, 'src', 'lib'), (name) => name.endsWith('.js')
   });
 }
 
-// ---- 4b：UI 发出的每个消息类型都必须有后台 handler ----
-// UI 与后台的契约只靠字符串维系，写错一个字母浏览器不会报错，只会静默什么都不做。
+// ---- 4b：UI 与内容脚本发出的每个消息类型都必须有后台 handler ----
+// 契约只靠字符串维系，写错一个字母浏览器不会报错，只会静默什么都不做。
 
 const messagingFile = join(ROOT, 'src', 'background', 'messaging.js');
 if (existsSync(messagingFile)) {
@@ -172,11 +190,19 @@ if (existsSync(messagingFile)) {
       [...handlersBlock[1].matchAll(/^\s{2}(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1]),
     );
 
-    for (const file of walk(join(ROOT, 'src', 'pages'), (name) => name.endsWith('.js'))) {
-      const pageSource = readFileSync(file, 'utf8');
-      for (const m of pageSource.matchAll(/\bsend\(\s*['"]([^'"]+)['"]/g)) {
-        if (!handlerNames.has(m[1])) {
-          fail(`${rel(file)} 发送了消息 "${m[1]}"，但 messaging.js 里没有对应的 handler`);
+    // 页面走 shared/api.js 的 send('type')；内容脚本没法 import 它，
+    // 只能直接 chrome.runtime.sendMessage({type: 'x'})，所以两种写法都要扫
+    const senders = [
+      { dir: join(ROOT, 'src', 'pages'), re: /\bsend\(\s*['"]([^'"]+)['"]/g },
+      { dir: join(ROOT, 'src', 'content'), re: /\btype:\s*['"]([^'"]+)['"]/g },
+    ];
+    for (const { dir, re } of senders) {
+      for (const file of walk(dir, (name) => name.endsWith('.js'))) {
+        const pageSource = readFileSync(file, 'utf8');
+        for (const m of pageSource.matchAll(re)) {
+          if (!handlerNames.has(m[1])) {
+            fail(`${rel(file)} 发送了消息 "${m[1]}"，但 messaging.js 里没有对应的 handler`);
+          }
         }
       }
     }

@@ -24,6 +24,7 @@
 
 import { asciiJson, toAsciiHost } from './ascii.js';
 import { pacToken, isSelectable } from './node-model.js';
+import { templateHost } from './image-proxy.js';
 import { validateRule, wildcardToRegexSource, sanitizedScope } from './rule-matcher.js';
 
 /** 私有网段 / 本地地址的 shExpMatch 模式 */
@@ -124,15 +125,26 @@ function compile(config) {
     pools.push(entry);
   }
 
+  // 兜底图片代理必须绕过轮询池。它存在的前提就是「轮询节点都不好使了」，这时候再把
+  // 取兜底图的请求送进同一个坏池子，等于让最后一道防线跟着一起挂。而一条宽泛的规则
+  // （比如 `^https?://(img|cdn)\d*\.`）完全可能恰好命中兜底服务的域名 —— 那种失效
+  // 很难自查，不如在这里直接钉死。
+  const fallbackHost = settings.fallbackImage?.enabled
+    ? templateHost(settings.fallbackImage.template)
+    : null;
+
+  const bypassList = Array.isArray(settings.bypassList)
+    ? settings.bypassList.filter((x) => x && x !== '<local>')
+    : [];
+  if (fallbackHost) bypassList.push(fallbackHost);
+
   return {
     data: {
       enabled: config?.enabled === true,
       fallback: settings.fallback === 'block' ? 'block' : 'direct',
       rotateEvery: Math.max(1, Number.parseInt(settings.rotateEvery, 10) || 1),
       // 绕过项同样是主机名模式，同样要转码
-      bypass: Array.isArray(settings.bypassList)
-        ? settings.bypassList.filter((x) => x && x !== '<local>').map(toAsciiHost)
-        : [],
+      bypass: bypassList.map(toAsciiHost),
       privates: privatePatterns(),
       tokens,
       pools,

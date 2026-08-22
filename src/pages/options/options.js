@@ -20,6 +20,7 @@ import { pacUrl, isSanitizedScheme } from '../../lib/pac-url.js';
 
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { selectablePool } from '../../lib/scheduler.js';
+import { validateTemplate } from '../../lib/image-proxy.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
 
 const $ = (id) => document.getElementById(id);
@@ -126,6 +127,7 @@ function renderStatsPanel() {
   if (!config) return;
   renderRunState();
   renderRequestKpis();
+  renderRetryKpis();
   renderNodeUsage();
   renderRuleHits();
 }
@@ -235,6 +237,60 @@ function renderRequestKpis() {
       + '所以依赖扩展名或路径的规则（例如 \\.jpg$）对 HTTPS 图片永远命中不了 —— '
       + '不报错，只是安静地直连。把这类规则改成「域名」类型即可。'
     : '', 'err');
+}
+
+/**
+ * 重试与兜底的 KPI。
+ *
+ * 这几个数字全是**观测值**：重试由本扩展的内容脚本亲自发起，重发之后是 load 还是
+ * error 也由它回报。所以「重试救回」是真的收到了 load，不是「大概成功了」。
+ *
+ * 「重试」为零并不一定是好事 —— 也可能是兜底策略选了「直连原图」，代理连不上时
+ * 浏览器静默改走直连、图片正常显示、根本不派发 error。那种矛盾组合由 renderSettings
+ * 那边的 retryWarning 负责说，这里只在数字本身不对劲时给色调。
+ */
+function renderRetryKpis() {
+  const box = $('retryKpis');
+  clear(box);
+  const retry = metrics?.retry;
+  const fb = metrics?.fallbackImage;
+  if (!retry || !fb) return;
+
+  box.append(
+    kpi({ label: '重试', value: retry.attempted, unit: '次' }),
+    kpi({
+      label: '重试救回',
+      value: retry.recovered,
+      unit: '次',
+      tone: retry.attempted > 0 && retry.recovered === 0 ? 'warn' : 'ok',
+    }),
+    kpi({
+      label: '重试成功率',
+      value: retry.recoveryRate,
+      unit: '%',
+      tone: retry.recoveryRate === null ? '' : (retry.recoveryRate >= 50 ? 'ok' : 'warn'),
+    }),
+    kpi({
+      label: '用尽仍失败',
+      value: retry.exhausted,
+      unit: '次',
+      tone: retry.exhausted > 0 ? 'err' : '',
+      hint: retry.exhausted > 0 ? '所有节点都取不到这些图' : '',
+    }),
+    kpi({
+      label: '未重试',
+      value: retry.skipped,
+      unit: '次',
+      hint: retry.skipped > 0 ? '多为图源自己返回了 4xx/5xx' : '',
+    }),
+    kpi({ label: '兜底接管', value: fb.used, unit: '次' }),
+    kpi({
+      label: '兜底成功率',
+      value: fb.successRate,
+      unit: '%',
+      tone: fb.successRate === null ? '' : (fb.successRate >= 90 ? 'ok' : 'warn'),
+    }),
+  );
 }
 
 /**
@@ -494,6 +550,10 @@ function renderSettings() {
   $('strategy').value = s.strategy;
   $('fallback').value = s.fallback;
   $('rotateEvery').value = s.rotateEvery;
+  $('retryAttempts').value = s.retry.maxAttempts;
+  $('retryDelay').value = s.retry.delayMs;
+  $('fallbackImageTemplate').value = s.fallbackImage.template;
+  $('fallbackImageEnabled').checked = s.fallbackImage.enabled;
   $('probeUrl').value = s.probe.url;
   $('probeTimeout').value = s.probe.timeoutMs;
   $('probeInterval').value = s.probe.intervalMinutes;
@@ -502,6 +562,41 @@ function renderSettings() {
   $('bypassList').value = s.bypassList.join(', ');
   $('autoDisable').checked = s.probe.autoDisable;
   $('recoverProbe').checked = s.probe.recoverProbe;
+  renderRetryWarning();
+}
+
+/**
+ * 「设置得看着在生效、实际整块失效」的那两种组合。
+ *
+ * 头一种是本次改动里最容易踩的坑：兜底策略选「直连原图」时，代理连不上会被浏览器
+ * 静默改走直连 —— 图片正常显示、不派发 error，于是内容脚本什么都收不到，重试和
+ * 兜底代理**一次都不会触发**，而真实 IP 已经交给图源了。这个后果必须写在做选择的
+ * 地方，不能只写进文档。
+ *
+ * 第二种是模板填了但不合法：规范化时会强制把开关关掉（见 lib/schema.js），
+ * 界面上得说清楚它为什么自己关了，否则就是又一个静默失败。
+ */
+function renderRetryWarning() {
+  const s = config.settings;
+  const wantsRetry = s.retry.maxAttempts > 1 || Boolean(s.fallbackImage.template);
+  const template = s.fallbackImage.template;
+  const check = template ? validateTemplate(template) : { ok: true };
+
+  if (s.fallback === 'direct' && wantsRetry) {
+    setBanner($('retryWarning'),
+      '当前「全部失败后」是直连原图：代理连不上时浏览器会静默改走直连，图片照常显示、'
+      + '不会报错 —— 于是重试与兜底代理一次都不会触发，而你的真实 IP 已经交给图源了。'
+      + '想让它们生效，请改选「不直连」。',
+      'warn');
+    return;
+  }
+  if (!check.ok) {
+    setBanner($('retryWarning'),
+      `兜底图片代理地址不可用，已自动停用：${check.reason}。点「试一下」可当场验证。`,
+      'warn');
+    return;
+  }
+  setBanner($('retryWarning'), '');
 }
 
 function renderControlWarning(control) {
@@ -647,6 +742,10 @@ const saveSettings = debounce(async () => {
     next.settings.strategy = $('strategy').value;
     next.settings.fallback = $('fallback').value;
     next.settings.rotateEvery = Number($('rotateEvery').value);
+    next.settings.retry.maxAttempts = Number($('retryAttempts').value);
+    next.settings.retry.delayMs = Number($('retryDelay').value);
+    next.settings.fallbackImage.template = $('fallbackImageTemplate').value.trim();
+    next.settings.fallbackImage.enabled = $('fallbackImageEnabled').checked;
     next.settings.logLimit = Number($('logLimit').value);
     next.settings.bypassList = $('bypassList').value.split(',').map((s) => s.trim()).filter(Boolean);
     next.settings.probe.url = $('probeUrl').value.trim();
@@ -845,10 +944,28 @@ $('btnTestRule').addEventListener('click', () => {
 });
 
 
-for (const id of ['strategy', 'fallback', 'rotateEvery', 'probeUrl', 'probeTimeout',
+for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retryDelay',
+  'fallbackImageTemplate', 'fallbackImageEnabled', 'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
   $(id).addEventListener('change', saveSettings);
 }
+
+$('btnTestFallbackImage').addEventListener('click', async () => {
+  const template = $('fallbackImageTemplate').value.trim();
+  // 用户没填试算地址时给一个样例，别让「试一下」因为空输入就报错
+  const probe = $('fallbackImageProbe').value.trim() || 'https://cdn.example.com/ch1/001.jpg';
+
+  // 校验交给后台，与真正改写图片地址时用的是同一个函数 —— 两边各写一份判断，
+  // 迟早会出现「试一下说没问题、实际不生效」
+  await guard(async () => {
+    const res = await send('previewFallbackImage', { template, url: probe });
+    setBanner($('fallbackImageResult'),
+      `改写结果：${res.url}\n`
+      + `兜底服务的源是 ${res.origin}。这些请求不经轮询池，直接发往它 —— `
+      + '请确认你信任这个服务：它会看到你访问的每一张图的地址。',
+      'ok');
+  }, 'fallbackImageResult');
+});
 
 $('btnExportFile').addEventListener('click', async () => {
   await guard(async () => {

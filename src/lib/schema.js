@@ -9,8 +9,11 @@
 import {
   CONFIG_VERSION, KNOWN_PROTOCOLS, PROTOCOL_ALIASES, RULE_TYPES,
   STRATEGIES, FALLBACKS, DEFAULT_PROBE_URL, DEFAULT_BYPASS_LIST,
+  RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS,
   defaultConfig, defaultSettings, defaultProbeSettings,
+  defaultRetrySettings, defaultFallbackImage,
 } from './constants.js';
+import { validateTemplate } from './image-proxy.js';
 import { stableId, isValidId } from './hash.js';
 
 /** 把值夹到 [min, max] 区间内的整数；非法时返回 fallback */
@@ -160,6 +163,33 @@ export function normalizeProbeSettings(raw) {
   };
 }
 
+export function normalizeRetrySettings(raw) {
+  const base = defaultRetrySettings();
+  if (!isPlainObject(raw)) return base;
+  return {
+    maxAttempts: clampInt(raw.maxAttempts, 1, RETRY_ATTEMPTS_CAP, base.maxAttempts),
+    delayMs: clampInt(raw.delayMs, 0, RETRY_DELAY_CAP_MS, base.delayMs),
+  };
+}
+
+/**
+ * 规范化兜底图片代理设置。
+ *
+ * **模板非法时强制 enabled=false，但保留用户填的文本。** 两件事各有理由：
+ * 强制关闭是为了不让「开关显示开着、实际什么都不会发生」这种状态被持久化 ——
+ * 那正是本项目反复吃过亏的那类静默失败；保留文本是为了不把用户填了一半的东西
+ * 抹掉，设置页会在字段旁边直接说明它为什么没被启用。
+ */
+export function normalizeFallbackImage(raw) {
+  const base = defaultFallbackImage();
+  if (!isPlainObject(raw)) return base;
+  const template = asString(raw.template).trim();
+  return {
+    enabled: raw.enabled === true && validateTemplate(template).ok,
+    template,
+  };
+}
+
 export function normalizeSettings(raw) {
   const base = defaultSettings();
   if (!isPlainObject(raw)) return base;
@@ -172,6 +202,8 @@ export function normalizeSettings(raw) {
     strategy: STRATEGIES.includes(raw.strategy) ? raw.strategy : base.strategy,
     fallback: FALLBACKS.includes(raw.fallback) ? raw.fallback : base.fallback,
     rotateEvery: clampInt(raw.rotateEvery, 1, 1000, base.rotateEvery),
+    retry: normalizeRetrySettings(raw.retry),
+    fallbackImage: normalizeFallbackImage(raw.fallbackImage),
     probe: normalizeProbeSettings(raw.probe),
     logLimit: clampInt(raw.logLimit, 10, 2000, base.logLimit),
     bypassList,
