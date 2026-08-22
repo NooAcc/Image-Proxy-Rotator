@@ -27,6 +27,7 @@ import { isSupported, protocolLabel } from '../lib/node-model.js';
 import { getConfig, updateConfig, getLogger, getRuntime, saveRuntime } from './state.js';
 import { noteProbeMetric } from './metrics-store.js';
 import { applyProxy, applyProbePac } from './proxy-controller.js';
+import { dbg } from './debug-store.js';
 
 let probeSeq = 0;
 
@@ -117,7 +118,10 @@ export async function probeNode(nodeId) {
     return { nodeId, ok: false, latencyMs: null, error: `${protocolLabel(node.protocol)}：${UNSUPPORTED_PROTOCOL_MESSAGE}`, unsupported: true };
   }
   // 不落库、不计数：这不是节点的失败，是操作被拒绝
-  if (probeInFlight) return { nodeId, ok: false, latencyMs: null, error: BUSY_MESSAGE, busy: true };
+  if (probeInFlight) {
+    if (dbg.on) dbg('probe', 'rejected-busy', { nodeId });
+    return { nodeId, ok: false, latencyMs: null, error: BUSY_MESSAGE, busy: true };
+  }
 
   probeInFlight = true;
   getRuntime().probing = true;
@@ -186,6 +190,18 @@ export async function recordProbeResult(nodeId, result) {
   const config = await getConfig();
   const node = config.nodes.find((n) => n.id === nodeId);
   const name = node?.name ?? nodeId;
+
+  if (dbg.on) {
+    dbg('probe', 'measured', {
+      nodeId,
+      ok: result.ok === true,
+      latencyMs: result.latencyMs ?? null,
+      error: result.error ?? null,
+      failures: node?.health.consecutiveFailures ?? 0,
+      autoDisabled: node?.autoDisabled === true,
+      egressIp: node?.health.egressIp ?? null,
+    });
+  }
 
   log.add({
     level: result.ok ? 'info' : 'warn',

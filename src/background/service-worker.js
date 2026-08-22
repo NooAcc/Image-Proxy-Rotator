@@ -12,6 +12,7 @@ import { handleMessage } from './messaging.js';
 import { onAlarm, scheduleProbeAlarm } from './health-monitor.js';
 import { installRequestLogger } from './request-logger.js';
 import { installAuthProvider } from './auth-provider.js';
+import { dbg, initDebug } from './debug-store.js';
 import { unsupportedNodes, protocolLabel } from '../lib/node-model.js';
 import { ALARM_PROBE, UNSUPPORTED_PROTOCOL_MESSAGE } from '../lib/constants.js';
 
@@ -43,6 +44,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 installRequestLogger();
 installAuthProvider();
 
+// 调试日志的开关监听必须在顶层同步注册（initDebug 的第一个 await 之前就 addListener 了），
+// 否则 SW 被唤醒后设置页那次改动传不进来。故意不 await：启动不该等它
+void initDebug();
+
 // ---- 启动流程 ----
 
 let booting = null;
@@ -56,9 +61,18 @@ function boot(reason) {
 }
 
 async function runBoot(reason) {
+  await initDebug();
   const log = await getLogger();
   try {
     const config = await getConfig();
+    if (dbg.on) {
+      dbg('config', 'booted', {
+        reason,
+        enabled: config.enabled,
+        nodes: config.nodes.length,
+        rules: config.rules.length,
+      });
+    }
     await applyProxy();
     await scheduleProbeAlarm();
     log.add({

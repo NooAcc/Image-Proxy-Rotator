@@ -14,6 +14,15 @@ import { applyProxy, readControl, previewPac } from './proxy-controller.js';
 import { metricsView, resetMetrics as clearMetrics, flushMetrics } from './metrics-store.js';
 import { probeNode as runProbeNode, probeAll as runProbeAll, scheduleProbeAlarm, resetNodeState as runResetNodeState } from './health-monitor.js';
 import { planRetry, noteRetryOutcome } from './retry-coordinator.js';
+import {
+  dbg,
+  setDebugEnabled,
+  debugState,
+  acceptDebugRows,
+  exportDebugFiles,
+  clearDebugLog,
+  flushDebugLog,
+} from './debug-store.js';
 import { decodeSubscription, parseNodeList } from '../lib/node-parser.js';
 import { createNode, dedupeNodes, nodeWarnings, unsupportedNodes, isSelectable } from '../lib/node-model.js';
 import { createRule, validateRule, ruleWarnings } from '../lib/rule-matcher.js';
@@ -349,7 +358,44 @@ const handlers = {
     }
     return { ok: true, url: rewritten, origin: templateOrigin(template) };
   },
+
+  // ---------------------------------------------------------------- 开发者调试日志
+
+  /** 面板快照：开关状态、占用、每个命名空间各多少条 */
+  async getDebug() {
+    return { ok: true, ...(await debugState()) };
+  },
+
+  async setDebug({ enabled }) {
+    await setDebugEnabled(enabled);
+    return { ok: true, ...(await debugState()) };
+  },
+
+  /** 内容脚本与 UI 页面的批量回传。它们自己存不住，见 debug-store.js 的开头 */
+  async debugPush({ rows }) {
+    return { ok: true, accepted: await acceptDebugRows(rows) };
+  },
+
+  /** 导出前先落盘一次，保证文件里包含最后那几行 */
+  async exportDebug() {
+    await flushDebugLog();
+    return { ok: true, ...(await exportDebugFiles()) };
+  },
+
+  async clearDebug() {
+    await clearDebugLog();
+    return { ok: true, ...(await debugState()) };
+  },
 };
+
+/**
+ * 记 `msg` 日志时必须排除的消息类型。
+ *
+ * 少一个排除，日志里就全是日志自己：面板每次刷新发 getDebug、页面侧每秒 flush 一次
+ * debugPush，两者都会被记成新的一行，而新的一行又会被下一次 flush 带走 —— 由定时器
+ * 驱动，**永不收敛**。这不是优化，是正确性。
+ */
+const DEBUG_SELF_TYPES = new Set(['getDebug', 'setDebug', 'debugPush', 'exportDebug', 'clearDebug']);
 
 /**
  * 分发一条消息。
@@ -361,10 +407,16 @@ export async function handleMessage(message) {
   const handler = handlers[type];
   if (!handler) return { ok: false, error: `未知的消息类型：${type}` };
 
+  const traced = dbg.on && !DEBUG_SELF_TYPES.has(type);
+  const startedAt = traced ? Date.now() : 0;
+
   try {
-    return (await handler(message)) ?? { ok: true };
+    const result = (await handler(message)) ?? { ok: true };
+    if (traced) dbg('msg', 'handled', { type, ms: Date.now() - startedAt, ok: result.ok !== false });
+    return result;
   } catch (e) {
     const detail = String(e?.message || e);
+    if (traced) dbg('msg', 'threw', { type, ms: Date.now() - startedAt, error: detail });
     try {
       const log = await getLogger();
       log.add({ level: 'error', kind: 'system', message: `处理「${type}」时出错：${detail}` });

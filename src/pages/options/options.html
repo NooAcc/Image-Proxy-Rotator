@@ -492,6 +492,37 @@
           <pre id="pacPreview">点「刷新」加载。</pre>
         </details>
       </section>
+
+      <section class="card">
+        <div class="card__head"><h2>开发者调试日志</h2></div>
+        <p class="hint">逐环节记录分流的内部状态，导出成文件用于排查。</p>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>它记什么、和「最近活动」有什么区别</summary>
+          <div class="card__help__body">
+            <p>「最近活动」是给你看的：一句话说清刚才那张图走了哪个节点。这里记的是给开发者看的
+              内部状态 —— PAC 编译与注入的结果、每个请求的归因过程、重试判定的全部入参、
+              页面侧到底重发了没有。<strong>两路日志互不影响</strong>，这里的开关不会动那一路。</p>
+            <p>导出时每个环节各成一个文件（<code>pac</code> / <code>request</code> /
+              <code>retry</code> / <code>content</code> 等）。跨环节对时间线要用合并文件。</p>
+            <p><strong>默认关闭，关着时不产生任何开销。</strong>开启后记录在会话存储里，
+              关掉开关或重启浏览器都会清空 —— 所以要先开开关，再重现问题。</p>
+            <p>分流脚本（PAC）内部发生的事记不到：它跑在浏览器的沙箱里，没有回传通道。
+              「这个请求选了哪个节点」只能看 <code>request</code> 里的对端 IP。</p>
+          </div>
+        </details>
+        <label class="check"><input type="checkbox" id="chkDebug"> 开启调试日志</label>
+        <p class="hint" id="debugStatus" role="status">未开启。</p>
+        <div class="btn-row">
+          <button type="button" class="btn btn--primary" id="btnExportDebug">导出（每环节一个文件）</button>
+          <button type="button" class="btn" id="btnExportDebugMerged">合并导出为一个文件</button>
+          <button type="button" class="btn" id="btnClearDebug">清空</button>
+        </div>
+        <div class="banner banner--warn">
+          导出的文件含你访问过的图片地址与代理服务器地址（不含代理账号密码）。
+          贴到公开 issue 之前请自己过一眼。
+        </div>
+        <div class="banner banner--err" id="debugError" hidden></div>
+      </section>
     </section>
 
   </main>

@@ -22,13 +22,14 @@
 │         └─────────────────┴──────────┴───────┬───────────┘   │
 │      state.js（配置缓存 + 运行时态）                           │
 │      metrics-store.js（统计计数器 + 节流落盘）                  │
+│      debug-store.js（开发者调试日志，默认关闭 · 决策 D25）     │
 └─────────────────────────────┬────────────────────────────────┘
                               │ 复用
 ┌─────────────────────────────▼────────────────────────────────┐
 │ src/lib/（纯 JS，零 chrome 依赖，全量单测）                    │
 │  constants  hash  schema  storage  ascii  pac-url             │
 │  node-parser  node-model  rule-matcher  scheduler             │
-│  pac-generator  logger  metrics  retry  image-proxy           │
+│  pac-generator  logger  metrics  retry  image-proxy  debug-log│
 └─────────────────────────────┬────────────────────────────────┘
                               │ 生成 PAC 字符串（纯 ASCII，只依赖 scheme+host+port）
 ┌─────────────────────────────▼────────────────────────────────┐
@@ -67,6 +68,7 @@
 | **D22** | 重试只针对**代理层与连接层失败**；HTTP 4xx / 5xx 一律不重试 | 换个代理拿到的还是同一个 404，重发只是白给图源添一次请求。内容脚本只看得到「图裂了」，真正的原因在 `request-logger` 的失败原因表里（按 URL 暂存 30 秒）。查不到就保守放弃 —— `onErrorOccurred` 与渲染进程派发 `error` 没有顺序保证，宁可少救一张图 |
 | **D23** | 兜底是 **URL 改写型图片代理**，不是 HTTP 代理；**且它的域名自动进绕过列表** | HTTP 代理只能通过 PAC 表达，而 PAC 里的兜底会在重试**之前**生效：连接失败被浏览器当场切到兜底并成功，图片根本不派发 `error`，「先换几个轮询节点」那一段永远执行不到 —— 兜底从「最后一道防线」变成了「第二个选项」。URL 改写逐请求生效，顺序正确，且不碰全局代理设置、不与测速抢那把锁（D19）。自动绕过是必要的：兜底存在的前提就是轮询池已经不好使了，而一条宽泛的规则完全可能恰好命中兜底服务的域名，那样最后一道防线会跟着一起挂 |
 | **D24** | 重试统计**只记内容脚本回报的观测值** | `retry.recovered` 是「重发之后真的收到了 load 事件」，不是「大概成功了」。同时必须明说重试会抬高 `requests.total` —— 重发就是一次新请求，`webRequest` 会照实再记一笔，于是成功率会比不开重试时低 |
+| **D25** | 开发者调试日志**另开一路**，不动 `lib/logger.js` 那份活动日志；缓冲**只在后台**一份，页面侧批量回传；开关存 `storage.local` 的独立键、**不进 `config`**；默认关闭且调用点用 `if (dbg.on)` 守卫 | 活动日志是给用户看的功能（200 条、中文整句、弹窗常驻），把几百个请求的调试细节灌进去，几秒钟就会把「哪个节点在干活」冲干净。缓冲不能分散到页面侧：页面级存储每个 tab / iframe 一份，页一关就没，而这套日志的价值恰恰是把「后台判定」与「页面执行」拼成一条时间线。开关不进 `config` 有两个理由 —— 它不该被「导出配置」带给别人，而放在独立键上内容脚本与 UI 能直接读并监听变更，不必每写一行先问一次后台。守卫是必须的：只在函数里判断的话，关着时那个 `{ ...十个字段 }` 照样要构造，而热路径上一个漫画页有几百个请求 |
 
 ---
 
@@ -202,6 +204,21 @@ Settings {
 
 运行时状态（日志、轮询起点、控制权）存 `chrome.storage.session`，丢了不影响功能。
 
+**开发者调试日志**（决策 D25）分两处存放，刻意都不在 `config` 里：
+
+```js
+// chrome.storage.local 的 `debug` 键 —— 只有开关，不进配置导出
+{ enabled: boolean, since: ?number }
+
+// chrome.storage.session 的 `debugLog` 键 —— 缓冲快照，浏览器重启即清空
+[{ at: number, ns: string, ev: string, data: object }, …]
+```
+
+`ns` 取自八个闭集合命名空间：`pac` / `probe` / `request` / `retry` / `config` / `msg` /
+`content` / `ui`（外加兜底的 `misc`）。上限 20000 条 + 4 MB，先到先限，超出丢最早的；
+落盘同样节流（3 秒或 200 条）。开关放在 `storage.local` 是为了让内容脚本与 UI 页面能
+**直接读并监听 `onChanged`** —— 否则每写一行都要先问一次后台「现在该记吗」。
+
 统计计数器另存在 `chrome.storage.local` 的 `metrics` 键下，**跨浏览器重启累计**：
 
 ```js
@@ -268,11 +285,13 @@ Metrics {
 | `lib/scheduler.js` | 节点池计算、轮询与哈希选择（PAC 之外的可测实现） |
 | `lib/pac-generator.js` | 把配置编译成 PAC 脚本字符串（保证纯 ASCII） |
 | `lib/logger.js` | 环形日志缓冲 |
+| `lib/debug-log.js` | 开发者调试日志的缓冲：条数与字节双上限、按命名空间分组、格式化成可落盘的文本（纯逻辑，决策 D25） |
 | `lib/metrics.js` | 统计计数器：累加、剪枝、汇总成视图模型（纯逻辑） |
 | `lib/retry.js` | 失败原因分类与重试判定（纯函数，决策 D22） |
 | `lib/image-proxy.js` | 兜底图片代理的模板校验与 URL 改写（纯函数，决策 D23） |
 | `background/state.js` | 配置缓存与运行时态 |
 | `background/metrics-store.js` | 统计的持久化：节流落盘 + 落盘前剪枝 |
+| `background/debug-store.js` | 调试日志缓冲的唯一持有者：读开关、接页面回传、节流落盘、产出导出文件（决策 D25） |
 | `background/proxy-controller.js` | 全扩展唯一写浏览器代理设置的地方 |
 | `background/health-monitor.js` | 测速、超时判定、自动禁用、定时任务 |
 | `background/request-logger.js` | 只读观测请求结果，计入统计，并按 URL 暂存失败原因供重试判定查询 |
@@ -290,7 +309,7 @@ Metrics {
 ## 测试策略
 
 ```bash
-npm test    # 409 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
+npm test    # 458 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
 npm run check
 ```
 
@@ -298,11 +317,12 @@ npm run check
 
 | 层 | 文件 | 手法 |
 |---|---|---|
-| 纯逻辑单元 | `tests/{storage,node-parser,node-model,rule-matcher,scheduler,logger,ascii,metrics,pac-url,retry,image-proxy}.test.js` | 直接调 `src/lib/`，零依赖 |
+| 纯逻辑单元 | `tests/{storage,node-parser,node-model,rule-matcher,scheduler,logger,ascii,metrics,pac-url,retry,image-proxy,debug-log}.test.js` | 直接调 `src/lib/`，零依赖 |
 | PAC 行为 | `tests/pac-generator.test.js` | `node:vm` 沙箱**真的执行**生成的脚本 |
 | 内容脚本行为 | `tests/content-retry.test.js` | `node:vm` 沙箱 + 约 50 行 DOM 替身，**真的执行**内容脚本 |
 | 主链路集成 | `tests/integration.test.js` | 从「用户粘贴的文本」一路跑到「PAC 做出路由决策」 |
 | 后台编排 | `tests/background.test.js`、`tests/retry-coordinator.test.js`、`tests/service-worker.test.js` | `tests/helpers/chrome-stub.js` 提供 `chrome.*` 与 `fetch` 替身 |
+| 调试日志 | `tests/debug-store.test.js`、`tests/debug-wiring.test.js`、`tests/ui-debug.test.js` | 前者验编排（开关传导、节流、导出形状），中间那份走真实链路后**从导出的文件正文里**断言调用点真的在记，最后一份钉住页面侧的自噬防护 |
 | UI 契约 | `tests/ui-{tokens,contract,status,components,density}.test.js` | 静态解析 CSS/HTML/JS；组件构造器用极小 DOM 替身 |
 | 打包产物 | `tests/pack.test.js` | 用另写一份的 zip 解析器把包拆回来逐字节比对 |
 

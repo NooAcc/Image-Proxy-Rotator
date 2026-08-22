@@ -12,6 +12,7 @@
 
 import { createStore } from '../lib/storage.js';
 import { createLogger } from '../lib/logger.js';
+import { dbg } from './debug-store.js';
 
 const store = createStore(chrome.storage.local);
 
@@ -36,13 +37,37 @@ const runtime = {
 };
 
 export async function getConfig() {
-  if (!cache) cache = await store.load();
+  if (!cache) {
+    cache = await store.load();
+    // 规范化会静默修补甚至丢弃单条记录（端口越界的节点、编译不了的正则）。
+    // 「读回来之后到底剩下什么」只有这里看得到
+    if (dbg.on) {
+      dbg('config', 'loaded', {
+        version: cache.version,
+        enabled: cache.enabled,
+        nodes: cache.nodes.length,
+        rules: cache.rules.length,
+        strategy: cache.settings.strategy,
+        fallback: cache.settings.fallback,
+        retry: cache.settings.retry,
+        fallbackImage: cache.settings.fallbackImage.enabled,
+      });
+    }
+  }
   return cache;
 }
 
 export async function setConfig(config) {
   cache = await store.save(config);
   if (logger) logger.setLimit(cache.settings.logLimit);
+  if (dbg.on) {
+    dbg('config', 'saved', {
+      enabled: cache.enabled,
+      nodes: cache.nodes.length,
+      rules: cache.rules.length,
+      autoDisabled: cache.nodes.filter((n) => n.autoDisabled).length,
+    });
+  }
   return cache;
 }
 

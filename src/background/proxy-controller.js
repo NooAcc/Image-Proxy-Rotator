@@ -9,6 +9,7 @@ import { generatePac, pacSummary, canRouteProbe } from '../lib/pac-generator.js'
 import { isAscii } from '../lib/ascii.js';
 import { getConfig, getRuntime, getLogger, saveRuntime } from './state.js';
 import { noteApplyMetric } from './metrics-store.js';
+import { dbg } from './debug-store.js';
 
 
 /** 读取当前代理设置的控制权 */
@@ -53,6 +54,7 @@ export async function applyProxy() {
     const control = await readControl();
     runtime.control = control;
     runtime.lastApplyAt = Date.now();
+    if (dbg.on) dbg('pac', 'cleared', { enabled: config.enabled, nodeCount: summary.nodeCount, level: control.levelOfControl });
     log.add({
       level: config.enabled && summary.nodeCount === 0 ? 'warn' : 'info',
       kind: 'proxy',
@@ -69,6 +71,20 @@ export async function applyProxy() {
   runtime.startIndex = startIndex + 1;
 
   const pac = generatePac(config, { startIndex });
+
+  // PAC 内部发生的事这里一个字都看不到（没有 console、没有回传通道，见 LIMITATIONS）。
+  // 能记的只有「编译出了什么」—— 逐请求选了哪个节点只能靠 request 里的对端 IP 反推
+  if (dbg.on) {
+    dbg('pac', 'compiled', {
+      bytes: pac.length,
+      nodes: summary.nodeCount,
+      rules: summary.ruleCount,
+      poolTokens: summary.poolTokenCount,
+      startIndex,
+      skippedNodes: summary.skipped.nodes.length,
+      skippedRules: summary.skipped.rules.length,
+    });
+  }
 
   // 最后一道闸：chrome.proxy 只接受纯 ASCII 的 pacScript.data，含一个非 ASCII 字节就
   // **整体**注入失败。生成器已经全程转义（见 lib/ascii.js），所以走到这里就是生成器出了
@@ -100,6 +116,7 @@ export async function applyProxy() {
     });
   } catch (e) {
     const detail = String(e?.message || e);
+    if (dbg.on) dbg('pac', 'inject-failed', { bytes: pac.length, error: detail });
     log.add({ level: 'error', kind: 'proxy', message: `注入代理设置失败：${detail}` });
     const control = await readControl();
     runtime.control = control;
@@ -114,6 +131,7 @@ export async function applyProxy() {
   runtime.lastApplyAt = Date.now();
   runtime.lastApplyError = null;
   await noteApplyMetric({ ok: true, at: runtime.lastApplyAt });
+  if (dbg.on) dbg('pac', 'injected', { controlled: control.controlled, level: control.levelOfControl, mode: control.mode });
 
   const skippedNote = summary.skipped.nodes.length || summary.skipped.rules.length
     ? `，已跳过 ${summary.skipped.nodes.length} 个节点 / ${summary.skipped.rules.length} 条规则`
@@ -181,6 +199,7 @@ export async function applyProbePac(nodeId) {
       error: `浏览器代理设置的控制权是「${control.levelOfControl}」，测速请求不会走本扩展指定的节点`,
     };
   }
+  if (dbg.on) dbg('probe', 'pac-directed', { nodeId, bytes: pac.length, level: control.levelOfControl });
   return { ok: true };
 }
 

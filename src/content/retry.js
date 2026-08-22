@@ -73,6 +73,79 @@
     void send({ type: 'imageRetryResult', url, kind, ok });
   }
 
+  // ---------------------------------------------------------------- 调试日志（页面侧）
+
+  /**
+   * 开发者调试日志的页面端（决策 D25）。
+   *
+   * **这里存不住东西。** 页面级存储每个 tab、每个 iframe 一份，页一关就没，导出时
+   * 根本不知道该去哪些 tab 收。所以只攒一小批发回后台，存与导都归 debug-store。
+   *
+   * 开关直接读 storage.local 并监听变更 —— 否则每写一行都得先问后台一次「现在该记吗」。
+   *
+   * 记的是后台**看不到**的那半截：等了多久、src 重赋了没有、最后是 load 还是 error。
+   */
+  const DEBUG_KEY = 'debug';
+  /** 攒够这么多行立刻发 */
+  const DEBUG_BATCH = 20;
+  /** 或者等这么久 */
+  const DEBUG_FLUSH_MS = 1000;
+  /** 单页最多回传多少行。与 PAGE_BUDGET 同一种思路：坏页面不能变成消息风暴 */
+  const DEBUG_PAGE_CAP = 2000;
+
+  let debugOn = false;
+  let debugSpent = 0;
+  let debugQueue = [];
+  let debugTimer = null;
+
+  function debugFlush() {
+    if (debugTimer) {
+      clearTimeout(debugTimer);
+      debugTimer = null;
+    }
+    if (debugQueue.length === 0) return;
+    const rows = debugQueue;
+    debugQueue = [];
+    void send({ type: 'debugPush', rows });
+  }
+
+  function dbg(ev, data) {
+    if (!debugOn || debugSpent >= DEBUG_PAGE_CAP) return;
+    debugSpent++;
+    debugQueue.push({ at: Date.now(), ns: 'content', ev, data: data || {} });
+    if (debugQueue.length >= DEBUG_BATCH) {
+      debugFlush();
+      return;
+    }
+    if (debugTimer) return;
+    debugTimer = setTimeout(debugFlush, DEBUG_FLUSH_MS);
+  }
+
+  try {
+    chrome.storage.local.get(DEBUG_KEY, (got) => {
+      void chrome.runtime.lastError;
+      debugOn = !!(got && got[DEBUG_KEY] && got[DEBUG_KEY].enabled === true);
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local' || !changes || !changes[DEBUG_KEY]) return;
+      const next = changes[DEBUG_KEY].newValue;
+      debugOn = !!(next && next.enabled === true);
+      if (!debugOn) debugQueue = [];
+    });
+  } catch {
+    // storage 不可用（上下文失效、权限被裁剪）时就当开关是关的
+  }
+
+  try {
+    // 收尾 flush 挂 visibilitychange 而不是 beforeunload —— 后者在 MV3 里不可靠，
+    // 而没有收尾的话，导航走了最后不足一批的那几行就永久丢了
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') debugFlush();
+    });
+  } catch {
+    // 没有这个事件也只是少一次收尾，定时器照样会发
+  }
+
   // ---------------------------------------------------------------- 重新加载
 
   /**
@@ -134,6 +207,7 @@
     if (!state) return;
     watching.delete(img);
     attempts.delete(state.url);
+    dbg('loaded', { url: state.url, mode: state.mode });
     report(state.url, state.mode, true);
   }
 
@@ -152,6 +226,7 @@
     const previous = watching.get(img);
     if (previous) {
       watching.delete(img);
+      dbg('retry-failed', { url: previous.url, mode: previous.mode });
       report(previous.url, previous.mode, false);
       // 兜底也失败了就到此为止 —— 再问下去只会套娃
       if (previous.mode === 'fallback') return;
@@ -167,27 +242,37 @@
       // 上限是刻意设的，但不能悄悄生效 —— 说一次，让它在活动日志里留下痕迹
       if (!budgetReported) {
         budgetReported = true;
+        dbg('budget-exhausted', { spent, cap: PAGE_BUDGET });
         report(url, 'budget', false);
       }
       return;
     }
 
     const attempt = (attempts.get(url) ?? 0) + 1;
-    if (inflight >= MAX_INFLIGHT) return;
+    if (inflight >= MAX_INFLIGHT) {
+      dbg('inflight-cap', { url, inflight });
+      return;
+    }
 
     asking.add(img);
     inflight++;
+    dbg('caught', { url, attempt });
     try {
       const plan = await send({ type: 'imageRetryAsk', url, attempt });
-      if (!plan || !plan.ok) return;
+      if (!plan || !plan.ok) {
+        dbg('no-plan', { url, attempt });
+        return;
+      }
 
       if (plan.reason === 'disabled') {
         disabledUntil = Date.now() + DISABLED_COOLDOWN_MS;
+        dbg('cooldown', { untilMs: DISABLED_COOLDOWN_MS });
         return;
       }
       if (plan.action !== 'retry' && plan.action !== 'fallback') {
         // 刻意**不**清掉计数：清了的话，页面自己再触发一次加载就会让整轮重试从头开始。
         // 「已经用尽」必须是黏住的状态
+        dbg('gave-up', { url, attempt, reason: plan.reason ?? null });
         return;
       }
 
@@ -202,14 +287,19 @@
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
       // 等待期间图片可能已被页面换掉或移除，这时重发没有意义
-      if (!img.isConnected) return;
+      if (!img.isConnected) {
+        dbg('detached', { url, attempt });
+        return;
+      }
 
       if (plan.action === 'retry') {
         watch(img, 'retry', url);
         reload(img, url);
+        dbg('resent', { url, attempt, waitedMs: Number.isFinite(delay) ? delay : 0 });
       } else {
         watch(img, 'fallback', plan.url);
         forceSrc(img, plan.url);
+        dbg('fallback-sent', { url, target: plan.url, attempt });
       }
     } finally {
       inflight--;

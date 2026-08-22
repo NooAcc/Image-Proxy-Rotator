@@ -10,8 +10,11 @@
  */
 
 /** 极简 chrome.storage.StorageArea */
-function makeArea() {
+function makeArea(name, notify) {
   let data = {};
+  const fire = async (changes) => {
+    if (notify) await notify(changes, name);
+  };
   return {
     async get(keys) {
       if (keys == null) return { ...data };
@@ -24,11 +27,21 @@ function makeArea() {
       return { ...data };
     },
     async set(obj) {
+      const changes = {};
+      for (const [key, value] of Object.entries(obj)) {
+        changes[key] = { oldValue: data[key], newValue: value };
+      }
       data = { ...data, ...obj };
+      await fire(changes);
     },
     async remove(key) {
       const keys = Array.isArray(key) ? key : [key];
-      for (const k of keys) delete data[k];
+      const changes = {};
+      for (const k of keys) {
+        changes[k] = { oldValue: data[k] };
+        delete data[k];
+      }
+      await fire(changes);
     },
     _dump: () => data,
     _clear: () => {
@@ -47,8 +60,8 @@ function makeEvent(bucket) {
  * 安装替身到 globalThis，返回可供断言与调整的把手。
  */
 export function installChromeStub() {
-  const local = makeArea();
-  const session = makeArea();
+  const local = makeArea('local', (changes, area) => dispatchStorageChange(changes, area));
+  const session = makeArea('session', (changes, area) => dispatchStorageChange(changes, area));
 
   /** chrome.proxy.settings 的调用记录 */
   const proxyCalls = [];
@@ -64,7 +77,13 @@ export function installChromeStub() {
     onCompleted: [],
     onErrorOccurred: [],
     onAuthRequired: [],
+    onChanged: [],
   };
+
+  /** storage 的变更广播。开关同步这条链路唯一的传导机制，没有它就断言不了 */
+  async function dispatchStorageChange(changes, area) {
+    for (const entry of listeners.onChanged) await entry.fn(changes, area);
+  }
   /** 探测请求记录 */
   const fetchCalls = [];
 
@@ -74,7 +93,7 @@ export function installChromeStub() {
   let fetchImpl = async () => ({ ok: true, status: 204 });
 
   globalThis.chrome = {
-    storage: { local, session },
+    storage: { local, session, onChanged: makeEvent(listeners.onChanged) },
 
     proxy: {
       settings: {
@@ -107,6 +126,8 @@ export function installChromeStub() {
       onMessage: makeEvent(listeners.onMessage),
       onInstalled: makeEvent(listeners.onInstalled),
       onStartup: makeEvent(listeners.onStartup),
+      /** 导出的调试日志文件头要写版本号 */
+      getManifest: () => ({ version: '0.0.0-test' }),
     },
 
     webRequest: {

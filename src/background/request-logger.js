@@ -28,6 +28,7 @@ import { matchUrl, matchPacUrl } from '../lib/rule-matcher.js';
 import { pacUrl } from '../lib/pac-url.js';
 import { getConfig, getLogger, queueRuntimeSave, updateConfig } from './state.js';
 import { noteRequestMetric } from './metrics-store.js';
+import { dbg } from './debug-store.js';
 import { PROBE_PARAM, FAILURE_TTL_MS } from '../lib/constants.js';
 import { classifyFailure } from '../lib/retry.js';
 
@@ -217,6 +218,25 @@ export function installRequestLogger() {
 
       if (blind) await warnBlindOnce(rule, details.url);
 
+      // 这是唯一能回答「PAC 到底把它送去哪了」的地方 —— 两次匹配的结论必须分开记，
+      // 混成一个数字就是 1.2.0 那份统计的病根（决策 D17）
+      if (dbg.on) {
+        dbg('request', 'completed', {
+          url: details.url,
+          pacUrl: pacUrl(details.url),
+          type: details.type ?? null,
+          status: details.statusCode,
+          ip: details.ip ?? null,
+          routed: !blind,
+          blind,
+          ruleId: rule.id,
+          nodeId: attributed.node?.id ?? null,
+          sharedHosts: attributed.shared,
+          viaNodeIp: attributed.viaNodeIp,
+          latencyMs,
+        });
+      }
+
       log.add({
         level: blind ? 'warn' : (ok ? 'info' : 'warn'),
         kind: 'request',
@@ -246,6 +266,17 @@ export function installRequestLogger() {
 
       // 失败原因留给重试判定。这是它唯一能知道「是代理连不上，还是别的什么」的来源
       noteFailure(details.url, { error: details.error });
+
+      if (dbg.on) {
+        dbg('request', 'errored', {
+          url: details.url,
+          type: details.type ?? null,
+          error: details.error,
+          cause: classifyFailure({ error: details.error }),
+          ruleId: verdict.rule.id,
+          blind: verdict.blind,
+        });
+      }
 
       // 连接层面就失败了，没有对端 IP 可归因，但它确实是一次「本该走代理」的请求，
       // 不计入总量会让成功率虚高

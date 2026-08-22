@@ -85,10 +85,12 @@ function img(url, extra = {}) {
 /**
  * 把内容脚本装进一个新的沙箱。
  * @param {(message: object) => object|null} respond 后台的应答
+ * @param {{debug?: boolean}} options debug 为真时替身让 storage.local 报告「调试日志已开启」
  * @returns 沙箱把手：触发 error、查看发出去的消息
  */
-function mount(respond) {
+function mount(respond, options = {}) {
   const sent = [];
+  const docHandlers = {};
   let onError = null;
 
   const sandbox = {
@@ -98,11 +100,15 @@ function mount(respond) {
     URL,
     Date,
     document: {
+      visibilityState: 'visible',
       addEventListener(type, fn, capture) {
-        // 资源加载失败的 error 不冒泡，只走捕获阶段 —— 挂错了整块功能静默失效
-        assert.equal(type, 'error');
-        assert.equal(capture, true, 'error 监听必须用捕获阶段，否则永远收不到');
-        onError = fn;
+        if (type === 'error') {
+          // 资源加载失败的 error 不冒泡，只走捕获阶段 —— 挂错了整块功能静默失效
+          assert.equal(capture, true, 'error 监听必须用捕获阶段，否则永远收不到');
+          onError = fn;
+          return;
+        }
+        docHandlers[type] = fn;
       },
     },
     chrome: {
@@ -114,6 +120,14 @@ function mount(respond) {
           // 用微任务而不是定时器纯粹是为了快：520 次预算测试若走定时器要跑七秒多
           queueMicrotask(() => callback(respond(message)));
         },
+      },
+      storage: {
+        local: {
+          get(_key, callback) {
+            callback(options.debug ? { debug: { enabled: true } } : {});
+          },
+        },
+        onChanged: { addListener() {} },
       },
     },
   };
@@ -127,6 +141,12 @@ function mount(respond) {
     fail: (target) => onError({ target }),
     asks: () => sent.filter((m) => m.type === 'imageRetryAsk'),
     results: () => sent.filter((m) => m.type === 'imageRetryResult'),
+    debugRows: () => sent.filter((m) => m.type === 'debugPush').flatMap((m) => m.rows),
+    /** 把页面切到后台，逼出收尾那一批 */
+    hide: () => {
+      sandbox.document.visibilityState = 'hidden';
+      docHandlers.visibilitychange?.();
+    },
   };
 }
 
@@ -350,4 +370,34 @@ test('同一张图正在等回复时不重入', async () => {
   await page.fail(el);
   await first;
   assert.equal(page.asks().length, 1, '重入会让同一张图并发发出多个重试');
+});
+
+// ---------------------------------------------------------------- 调试日志（页面侧）
+
+test('开关关着时页面侧一行调试日志都不发', async () => {
+  const page = mount(alwaysRetry);
+  await page.fail(img(IMG_URL));
+  assert.deepEqual(page.debugRows(), []);
+});
+
+test('开关开着时把重试链的页面那半截回传给后台', async () => {
+  const page = mount(alwaysRetry, { debug: true });
+  await page.fail(img(IMG_URL));
+  page.hide(); // 不足一批，靠切后台逼出收尾 flush
+
+  const rows = plain(page.debugRows());
+  assert.ok(rows.length > 0, '页面侧存不住东西，不回传就等于没有');
+  assert.ok(rows.every((r) => r.ns === 'content'), '命名空间必须是 content');
+  const events = rows.map((r) => r.ev);
+  assert.ok(events.includes('caught'), '捕获到裂图这一刻要记');
+  assert.ok(events.includes('resent'), '真的重新赋值了 src 也要记 —— 后台看不到这一步');
+  assert.equal(rows.find((r) => r.ev === 'caught').data.url, IMG_URL);
+});
+
+test('页面切后台时把攒着的那批发出去，不等定时器', async () => {
+  const page = mount(alwaysRetry, { debug: true });
+  await page.fail(img(IMG_URL));
+  const before = page.debugRows().length;
+  page.hide();
+  assert.ok(page.debugRows().length > before, '切后台没 flush 的话，导航走了这批就没了');
 });

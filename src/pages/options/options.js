@@ -12,7 +12,7 @@
 
 import {
   send, el, clear, debounce, fmtLatency, fmtAgo, fmtTime,
-  downloadText, copyText, fileStamp,
+  downloadText, copyText, fileStamp, uiDbg, flushUiDebug,
 } from '../shared/api.js';
 import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar, kvRow } from '../shared/ui.js';
 import { matchUrl, matchPacUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
@@ -64,6 +64,10 @@ function activatePanel(wanted) {
   }
   // 统计是唯一需要持续刷新的一屏，切走就停 —— 每次轮询都会唤醒 Service Worker
   setStatsPoll(target.hash === 'stats');
+  // 调试日志的条数只在切到「诊断」时拉一次：它不需要跟着秒表跳，
+  // 而每次拉取都要唤醒 Service Worker
+  if (target.hash === 'diagnostics') void refreshDebugState();
+  uiDbg('panel', { hash: target.hash });
   // 换了一屏就该从头看，而不是停在上一屏滚到的位置
   window.scrollTo({ top: 0 });
 }
@@ -1026,6 +1030,86 @@ $('btnResetMetrics').addEventListener('click', async () => {
     renderStatsPanel();
     setBanner($('globalError'), '统计数据已清零。', 'ok');
   });
+});
+
+// ---------------------------------------------------------------- 开发者调试日志
+
+/** 面板上那行状态。空缓冲要说「还没记到东西」，不能显示成 0 条了事 —— 两者的下一步不同 */
+function renderDebugState(state) {
+  $('chkDebug').checked = state.enabled === true;
+  if (!state.enabled) {
+    $('debugStatus').textContent = '未开启。开启后重现一次问题，再回来导出。';
+    return;
+  }
+  const { count, bytes, limit, byteBudget } = state.stats;
+  const groups = Object.entries(state.groups).map(([ns, n]) => `${ns} ${n}`).join('、');
+  $('debugStatus').textContent = `已开启：${count} 条 / ${(bytes / 1024).toFixed(1)} KB`
+    + `（上限 ${limit} 条 / ${Math.round(byteBudget / 1024 / 1024)} MB，超出后丢最早的）。`
+    + (groups || '还没有记录到任何东西 —— 去重现一次问题。');
+}
+
+/** 逐个触发下载。中间留一点间隔：连着几个 click() 浏览器可能只落地最后一个 */
+async function downloadAll(files) {
+  for (const [index, file] of files.entries()) {
+    if (index > 0) await new Promise((resolve) => setTimeout(resolve, 200));
+    downloadText(file.name, file.text, 'text/plain;charset=utf-8');
+  }
+}
+
+async function refreshDebugState() {
+  await guard(async () => {
+    renderDebugState(await send('getDebug'));
+  }, 'debugError');
+}
+
+$('chkDebug').addEventListener('change', async (e) => {
+  const enabled = e.target.checked;
+  await guard(async () => {
+    renderDebugState(await send('setDebug', { enabled }));
+    setBanner($('debugError'),
+      enabled
+        ? '已开启。现在去重现一次问题（打开出问题的漫画页），然后回来导出。'
+        : '已关闭，缓冲已清空。',
+      'ok');
+  }, 'debugError');
+});
+
+$('btnExportDebug').addEventListener('click', async () => {
+  await guard(async () => {
+    // 先把本页攒着的那几行发过去，否则 ui 那份文件会缺掉最后一段
+    await flushUiDebug();
+    const res = await send('exportDebug');
+    if (res.files.length === 0) {
+      setBanner($('debugError'), '还没有记录到任何调试日志。请先打开上面的开关，再重现一次问题。', 'warn');
+      return;
+    }
+    await downloadAll(res.files);
+    setBanner($('debugError'),
+      `已导出 ${res.files.length} 个文件（${res.files.map((f) => f.name).join('、')}）。`
+      + '浏览器可能会问一次「是否允许下载多个文件」。',
+      'ok');
+  }, 'debugError');
+});
+
+$('btnExportDebugMerged').addEventListener('click', async () => {
+  await guard(async () => {
+    await flushUiDebug();
+    const res = await send('exportDebug');
+    if (!res.merged) {
+      setBanner($('debugError'), '还没有记录到任何调试日志。请先打开上面的开关，再重现一次问题。', 'warn');
+      return;
+    }
+    downloadText(res.merged.name, res.merged.text, 'text/plain;charset=utf-8');
+    setBanner($('debugError'),
+      `已导出 ${res.merged.name}。跨环节的时间线只有这份合并文件连得起来。`, 'ok');
+  }, 'debugError');
+});
+
+$('btnClearDebug').addEventListener('click', async () => {
+  await guard(async () => {
+    renderDebugState(await send('clearDebug'));
+    setBanner($('debugError'), '调试日志已清空（「最近活动」与统计都不受影响）。', 'ok');
+  }, 'debugError');
 });
 
 // ---------------------------------------------------------------- 启动

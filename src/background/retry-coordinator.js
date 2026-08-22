@@ -14,6 +14,7 @@ import { matchPacUrl } from '../lib/rule-matcher.js';
 import { getConfig, getLogger, queueRuntimeSave } from './state.js';
 import { observedFailure, forgetFailure } from './request-logger.js';
 import { noteRetryMetric, noteFallbackImageMetric } from './metrics-store.js';
+import { dbg } from './debug-store.js';
 
 /**
  * 查不到失败原因时再等一次的时长。
@@ -70,7 +71,12 @@ const GIVE_UP_TEXT = {
  */
 export async function planRetry({ url, attempt } = {}) {
   const config = await getConfig();
-  const give = (reason) => ({ action: 'give-up', reason });
+  const give = (reason) => {
+    // 这一路提前返回**不写活动日志也不计数**，于是「为什么这张图没被重发」在别处
+    // 完全看不见。debug 日志是唯一能回答它的地方
+    if (dbg.on) dbg('retry', 'declined', { url: url ?? null, attempt: attempt ?? null, reason });
+    return { action: 'give-up', reason };
+  };
 
   if (!config.enabled) return give('disabled');
   if (typeof url !== 'string' || !url) return give('not-routed');
@@ -94,7 +100,9 @@ export async function planRetry({ url, attempt } = {}) {
   // 原因可能还没落地 —— onErrorOccurred 与渲染进程派发 error 是两条独立路径，
   // 没有顺序保证。等一次再查，仍然查不到就按「原因不明」处理（保守放弃）
   let kind = observedFailure(url);
+  let waited = false;
   if (!kind) {
+    waited = true;
     await sleep(LOOKUP_GRACE_MS);
     kind = observedFailure(url);
   }
@@ -109,6 +117,22 @@ export async function planRetry({ url, attempt } = {}) {
     fallbackEnabled: fallbackImage.enabled,
     fallbackTemplate: fallbackImage.template,
   });
+
+  // 判定的入参与结论一次记全。少记一项，事后就只能靠猜「当时 observedFailure 查到了吗」
+  if (dbg.on) {
+    dbg('retry', 'planned', {
+      url,
+      attempt,
+      cause: kind,
+      waitedForCause: waited,
+      action: plan.action,
+      reason: plan.reason ?? null,
+      maxAttempts: retry.maxAttempts,
+      delayMs: retry.delayMs,
+      fallbackEnabled: fallbackImage.enabled,
+      fallbackUrl: plan.url ?? null,
+    });
+  }
 
   const log = await getLogger();
 
@@ -155,7 +179,7 @@ export async function planRetry({ url, attempt } = {}) {
     });
     queueRuntimeSave();
   }
-  return give(plan.reason);
+  return { action: 'give-up', reason: plan.reason };
 }
 
 /**
@@ -168,6 +192,7 @@ export async function planRetry({ url, attempt } = {}) {
  */
 export async function noteRetryOutcome({ url, kind, ok } = {}) {
   const succeeded = ok === true;
+  if (dbg.on) dbg('retry', 'outcome', { url: url ?? null, kind: kind ?? null, ok: succeeded });
 
   // 页面侧的重试预算用完了。上限是刻意设的，但绝不能悄悄生效 —— 不说的话，
   // 用户看到的是「重试到一半就不重试了」，而统计里找不到任何解释
