@@ -1,6 +1,6 @@
 {
   "name": "image-proxy-rotator",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "description": "漫画图片代理分流：MV3 扩展，把命中规则的图片请求按轮询分散到多个 HTTP/HTTPS 代理节点",
   "private": true,
   "license": "MIT",
