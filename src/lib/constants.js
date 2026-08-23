@@ -135,8 +135,13 @@ export const RULE_TYPE_LABELS = {
 /** 分流策略 */
 export const STRATEGIES = ['round-robin', 'hash'];
 
-/** 无可用节点时的兜底行为 */
-export const FALLBACKS = ['direct', 'block'];
+/**
+ * 无可用节点时的兜底行为。
+ *
+ * 顺序即语义上的推荐顺序：`block` 在前，因为它才是让重试与兜底真正生效的那个
+ * （见 defaultSettings 的注释与 docs/LIMITATIONS.md 第 17 节）。
+ */
+export const FALLBACKS = ['block', 'direct'];
 
 /** 默认探测地址：返回 204 的极小响应，且允许跨域 */
 export const DEFAULT_PROBE_URL = 'https://cp.cloudflare.com/generate_204';
@@ -188,7 +193,23 @@ export function defaultDeepRetry() {
 export function defaultSettings() {
   return {
     strategy: 'round-robin',
-    fallback: 'direct',
+    /**
+     * 代理连不上时**不回落直连**。
+     *
+     * 1.4.3 及更早默认 `direct`，理由是「宁可图能显示，也不要一上来就整屏裂图」。
+     * 实际用下来这个默认值是错的，而且错得很安静：选 `direct` 时浏览器会在连不上代理时
+     * 静默改走直连 —— 图片照常显示、不派发 error，于是**重试、深度重试、兜底图片代理
+     * 三样一次都不会触发**，而真实 IP 已经交给图源了。用户看到的是「一切正常」，
+     * 实际上这个扩展存在的唯一理由已经失效了（详见 docs/LIMITATIONS.md 第 17 节）。
+     *
+     * 「装上之后什么都没发生」正是本项目反复吃过亏的那类故障，所以默认值改成让失败
+     * **可见**：代理不通就裂图，然后由重试链去救。代价是节点配错时会看到整屏裂图 ——
+     * 那是准确的反馈，不是缺陷。要旧行为的人可以在设置页改回「直连原图」。
+     *
+     * 注意这只影响**新装**与缺字段的配置：`normalizeSettings` 保留显式写着的取值，
+     * 老用户存的 `direct` 不会被这次改动动到。
+     */
+    fallback: 'block',
     rotateEvery: 1,
     retry: defaultRetrySettings(),
     fallbackImage: defaultFallbackImage(),

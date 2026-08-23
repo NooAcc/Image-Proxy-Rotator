@@ -151,7 +151,11 @@ test('历史配置里的非 HTTP/HTTPS 节点不会静默参与分流', async ()
 
   const pac = loadPac(generatePac(config, {}));
   for (let i = 0; i < 6; i++) {
-    assert.equal(pac.find(...MANGA), 'PROXY 10.0.0.1:8080; DIRECT', '只能选中那个 http 节点');
+    // 这条导入的配置没写 settings，兜底策略取的是默认值 —— 而这个用例要验的是
+    // 「只有 http 那个节点会被选中」，不该跟着默认值一起变。所以只断言代理 token
+    const chosen = pac.find(...MANGA);
+    assert.match(chosen, /^PROXY 10\.0\.0\.1:8080\b/, '只能选中那个 http 节点');
+    assert.doesNotMatch(chosen, /10\.0\.0\.9|v\.example\.com/, '不支持的节点绝不能进 PAC');
   }
 });
 

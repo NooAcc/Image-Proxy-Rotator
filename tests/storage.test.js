@@ -107,6 +107,23 @@ test('默认配置带上重试与兜底，且兜底默认不启用', () => {
   assert.deepEqual(s.fallbackImage, { enabled: false, template: '' });
 });
 
+test('新装默认「不直连」—— 否则重试、深度重试、兜底三样一次都不会触发', () => {
+  // 选 direct 时浏览器会在连不上代理时静默改走直连：图片照常显示、不派发 error，
+  // 扩展什么都收不到，而真实 IP 已经交给图源了。「装上之后什么都没发生」正是
+  // 本项目反复吃过亏的那类故障，所以默认值必须让失败可见（见 LIMITATIONS 第 17 节）
+  assert.equal(normalizeConfig({}).settings.fallback, 'block');
+  assert.equal(normalizeConfig({ settings: {} }).settings.fallback, 'block');
+});
+
+test('改默认值不许动老用户存下来的取值', () => {
+  // normalizeSettings 保留显式写着的取值，所以这次改默认只影响新装与缺字段的配置。
+  // 若哪天有人把它写成「无脑取默认」，这条会立刻红
+  assert.equal(normalizeConfig({ settings: { fallback: 'direct' } }).settings.fallback, 'direct');
+  assert.equal(normalizeConfig({ settings: { fallback: 'block' } }).settings.fallback, 'block');
+  // 非法取值仍然落回默认
+  assert.equal(normalizeConfig({ settings: { fallback: 'nonsense' } }).settings.fallback, 'block');
+});
+
 test('重试次数与间隔被夹进合法区间', () => {
   const tooBig = normalizeConfig({ settings: { retry: { maxAttempts: 999, delayMs: 999999 } } }).settings.retry;
   assert.equal(tooBig.maxAttempts, 10, '上限存在是为了防止误配把一张裂图变成几十次重刷');
