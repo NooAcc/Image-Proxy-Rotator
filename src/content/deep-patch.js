@@ -63,6 +63,13 @@
   const OUTCOME_TIMEOUT_MS = 25000;
   /** 跟踪中的 URL 数上限，防止长驻页面把 Map 撑大 */
   const MAX_TRACKED = 800;
+  /**
+   * 单次 fetch 最多循环几轮。
+   *
+   * 真正的上限在后台（`maxAttempts`，硬顶 10）。这一条只防一种边角：`attempts` 表撑到
+   * MAX_TRACKED 被整体清空时次数会归零，后台就再也判不出「用尽」了。
+   */
+  const HARD_ROUND_CAP = 10;
 
   /** 原始 URL -> 已经尝试过几次（含首次） */
   const attempts = new Map();
@@ -175,19 +182,36 @@
     return Boolean(error) && (error.name === 'AbortError' || error.code === 20);
   }
 
+  /**
+   * 包住一次 fetch。
+   *
+   * **必须循环。** 只重发一次的话，`maxAttempts` 这个设置在 fetch 这条路上完全不起作用
+   * （用户设 3，实测只发 2 个请求），而且更糟的是账对不上：重发又失败时 `ok:false` 在
+   * `noteRetryOutcome` 里没有落点，后台的 `attempted` 于是永久停在 `pending` 里 ——
+   * 面板上「还没有结论」只增不减。
+   *
+   * XHR 与 Image 天然是循环的（失败会再派发一次 error，再问一次后台），只有 fetch 这条
+   * 路是补丁自己驱动的，所以循环得写在这里。上限仍然全在后台（决策 D21）：`requestPlan`
+   * 每问一次 attempt 就 +1，后台一旦判定用尽就回 give-up，循环随之结束并记上 `exhausted`。
+   * 外面那个 round 上限只是防御 —— `attempts` 表被撑爆清空时不该变成无限重发。
+   */
   async function retryingFetch(self, input, init, url, signal) {
+    let error;
     try {
       return await nativeFetch.call(self, input, init);
-    } catch (error) {
-      if (isAbort(error, signal)) throw error;
-
+    } catch (first) {
       // fetch 的 reject 分不出「代理连不上」和「CORS 被拒」—— 两者都是
       // `TypeError: Failed to fetch`。真正的错误码在 webRequest 那边，
       // 所以这里不做任何分类，一律交给后台判（决策 D21 / D22）
+      if (isAbort(first, signal)) throw first;
+      error = first;
+    }
+
+    for (let round = 0; round < HARD_ROUND_CAP; round++) {
       const plan = await requestPlan(url, 'fetch');
       // fetch 拿到 fallback 也当放弃：兜底是图片代理，把一个 JSON 接口套进去毫无意义。
       // 后台已经按 via 关掉了兜底，这里再挡一次纯属保险
-      if (!plan || plan.action !== 'retry') throw error;
+      if (!plan || plan.action !== 'retry') break;
 
       try {
         const response = await nativeFetch.call(self, input, init);
@@ -195,10 +219,16 @@
         report(url, 'fetch', 'retry', true);
         return response;
       } catch (again) {
-        report(url, 'fetch', 'retry', isAbort(again, signal) ? null : false);
-        throw again;
+        error = again;
+        if (isAbort(again, signal)) {
+          report(url, 'fetch', 'retry', null);
+          throw again;
+        }
+        report(url, 'fetch', 'retry', false);
       }
     }
+
+    throw error;
   }
 
   if (typeof nativeFetch === 'function') {

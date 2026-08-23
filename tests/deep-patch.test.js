@@ -328,8 +328,11 @@ test('后台说 give-up 时原样报错，且只发过一次请求', async () =>
 });
 
 test('重发又失败时如实回报 false，并把错误交给页面', async () => {
-  const box = mount(alwaysRetry);
-  box.failTimes(API, 2);
+  // 后台只同意一次重发，第二次就判定用尽 —— 于是「重发了一次、又失败了」是终局
+  const box = mount((ask) => (ask.attempt < 2
+    ? { ok: true, action: 'retry', delayMs: 0 }
+    : { ok: true, action: 'give-up', reason: 'exhausted' }));
+  box.failTimes(API, 5);
 
   await assert.rejects(() => box.window.fetch(API));
   await box.settle();
@@ -565,4 +568,74 @@ test('装第二次不会包两次 —— 重复包装会让一次失败问后台
   const wrapped = box.window.fetch;
   runInContext(SOURCE, createContext(box.window), { timeout: 2000 });
   assert.equal(box.window.fetch, wrapped, '第二次装载应当直接退场');
+});
+
+// ---------------------------------------------------------------- fetch 的重发轮数
+
+test('fetch 会一直问到后台说停 —— maxAttempts 是后台的事，补丁不能只重发一次', async () => {
+  // 后台按 attempt 决定：前两次同意重发，第三次判定用尽。
+  // 补丁若只重发一次，第 3 个请求根本不会发出，用户设的「最多尝试 3 个节点」就是空话
+  const box = mount((ask) => (ask.attempt < 3
+    ? { ok: true, action: 'retry', delayMs: 0 }
+    : { ok: true, action: 'give-up', reason: 'exhausted' }));
+  box.failTimes(API, 9);
+
+  await assert.rejects(() => box.window.fetch(API));
+  await box.settle();
+
+  assert.deepEqual(box.asks().map((a) => a.attempt), [1, 2, 3]);
+  assert.equal(box.requests.length, 3, '原始 1 次 + 重发 2 次');
+});
+
+test('循环里每一次重发都单独回报结局，最后那次 give-up 才收尾', async () => {
+  const box = mount((ask) => (ask.attempt < 3
+    ? { ok: true, action: 'retry', delayMs: 0 }
+    : { ok: true, action: 'give-up', reason: 'exhausted' }));
+  box.failTimes(API, 9);
+
+  await assert.rejects(() => box.window.fetch(API));
+  await box.settle();
+
+  // 两次重发都失败了，两笔 ok:false。少记一笔，后台的 attempted 就会永久停在
+  // pending 里 —— 面板上「还没有结论」只增不减
+  assert.deepEqual(box.results().map((r) => [r.via, r.ok]), [['fetch', false], ['fetch', false]]);
+});
+
+test('循环中途成功就立刻返回，不再多发一个请求', async () => {
+  const box = mount(alwaysRetry);
+  box.failTimes(API, 2);
+
+  const response = await box.window.fetch(API);
+  await box.settle();
+
+  assert.equal(response.ok, true);
+  assert.equal(box.requests.length, 3, '第 3 次成功，不该有第 4 次');
+  assert.deepEqual(box.results().map((r) => r.ok), [false, true]);
+});
+
+test('循环期间被取消就立刻退出，不会接着重发', async () => {
+  const box = mount(alwaysRetry);
+  box.failTimes(API, 9);
+  const signal = { aborted: false };
+
+  const promise = box.window.fetch(API, { signal });
+  await box.settle();
+  const sent = box.requests.length;
+  signal.aborted = true;
+  await box.settle();
+
+  await assert.rejects(() => promise);
+  assert.ok(box.requests.length <= sent + 1,
+    `取消之后不该继续重发，取消前 ${sent} 次、最终 ${box.requests.length} 次`);
+});
+
+test('后台一直说重发也不会无限循环 —— attempts 表被清空时的兜底', async () => {
+  const box = mount(alwaysRetry);
+  box.failTimes(API, 1000);
+
+  await assert.rejects(() => box.window.fetch(API));
+  await box.settle();
+
+  assert.ok(box.requests.length <= 11,
+    `硬上限是 10 轮，实际发了 ${box.requests.length} 次`);
 });
