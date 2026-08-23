@@ -7,12 +7,13 @@
  *
  * 需要 `webRequest` + `webRequestAuthProvider` 两个权限。
  *
- * 只对 HTTP/HTTPS 代理节点应答 —— 本程序不支持其他代理类型，那些节点也不会被 PAC
- * 选中，因此永远不会走到这里。
+ * 只对 HTTP/HTTPS 代理节点与兜底代理应答 —— 本程序不支持其他代理类型，那些节点也不会被
+ * PAC 选中，因此永远不会走到这里。
  */
 
 import { getConfig, getLogger } from './state.js';
 import { isSupported, protocolLabel } from '../lib/node-model.js';
+import { fallbackProxyToken } from '../lib/fallback-proxy.js';
 
 /** 已尝试过的 requestId：凭据错误时避免无限重试 */
 const tried = new Set();
@@ -57,24 +58,36 @@ async function resolveCredentials(details) {
     (n) => isSupported(n) && n.host === host && Number(n.port) === port && n.username,
   );
 
-  if (!node) {
-    // 如果地址对得上但协议不受支持，要说清楚原因，而不是让用户以为是密码错了
-    const mismatched = config.nodes.find((n) => n.host === host && Number(n.port) === port);
+  if (node) {
     log.add({
-      level: 'warn',
+      level: 'info',
       kind: 'proxy',
-      message: mismatched && !isSupported(mismatched)
-        ? `代理 ${host}:${port} 要求认证，但该节点是 ${protocolLabel(mismatched.protocol)} 类型，本程序仅支持 HTTP/HTTPS 代理`
-        : `代理 ${host}:${port} 要求认证，但节点列表里没有匹配的账号密码，该请求可能失败`,
+      nodeId: node.id,
+      message: `已为节点「${node.name}」自动提供代理凭据`,
     });
-    return {};
+    return { authCredentials: { username: node.username, password: node.password } };
   }
 
+  // 兜底代理不在 nodes 里（它不测速、不自动禁用、不参与轮询），所以要单独认一次。
+  // 漏掉这一段的表现是：轮询节点都失败之后切到兜底代理，然后每张图弹一次认证框
+  const fallback = config.settings.fallbackProxy;
+  if (fallbackProxyToken(fallback) && fallback.host === host && Number(fallback.port) === port && fallback.username) {
+    log.add({
+      level: 'info',
+      kind: 'proxy',
+      message: `已为兜底代理 ${host}:${port} 自动提供凭据`,
+    });
+    return { authCredentials: { username: fallback.username, password: fallback.password } };
+  }
+
+  // 如果地址对得上但协议不受支持，要说清楚原因，而不是让用户以为是密码错了
+  const mismatched = config.nodes.find((n) => n.host === host && Number(n.port) === port);
   log.add({
-    level: 'info',
+    level: 'warn',
     kind: 'proxy',
-    nodeId: node.id,
-    message: `已为节点「${node.name}」自动提供代理凭据`,
+    message: mismatched && !isSupported(mismatched)
+      ? `代理 ${host}:${port} 要求认证，但该节点是 ${protocolLabel(mismatched.protocol)} 类型，本程序仅支持 HTTP/HTTPS 代理`
+      : `代理 ${host}:${port} 要求认证，但节点列表与兜底代理里都没有匹配的账号密码，该请求可能失败`,
   });
-  return { authCredentials: { username: node.username, password: node.password } };
+  return {};
 }

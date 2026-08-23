@@ -216,22 +216,24 @@
 
     for (let round = 0; round < HARD_ROUND_CAP; round++) {
       const plan = await requestPlan(url, 'fetch');
-      // fetch 拿到 fallback 也当放弃：兜底是图片代理，把一个 JSON 接口套进去毫无意义。
-      // 后台已经按 via 关掉了兜底，这里再挡一次纯属保险
-      if (!plan || plan.action !== 'retry') break;
+      if (!plan) break;
+      // 1.5.0 起兜底是**传输层**的：后台把这个源临时指向兜底代理，重发同一个地址即可。
+      // 于是 fetch 第一次拿到了兜底能力 —— 旧的 URL 改写型兜底对接口毫无意义
+      // （把一个 JSON 接口套进 `?url=` 只会拿回一张图或一个错误），那时这条路直接放弃
+      const mode = plan.action === 'fallback' ? 'fallback' : 'retry';
 
       try {
         const response = await nativeFetch.call(self, input, init);
         clearAttempt(url);
-        report(url, 'fetch', 'retry', true);
+        report(url, 'fetch', mode, true);
         return response;
       } catch (again) {
         error = again;
         if (isAbort(again, signal)) {
-          report(url, 'fetch', 'retry', null);
+          report(url, 'fetch', mode, null);
           throw again;
         }
-        report(url, 'fetch', 'retry', false);
+        report(url, 'fetch', mode, false);
       }
     }
 
@@ -301,8 +303,9 @@
     state.busy = true;
     try {
       const plan = await requestPlan(state.url, 'xhr');
-      // 与 fetch 同理：兜底是图片代理，XHR 拿到它一律当放弃
-      if (!plan || plan.action !== 'retry' || state.aborted) return;
+      if (!plan || state.aborted) return;
+      // 与 fetch 同理：1.5.0 起兜底是传输层的，XHR 也能用了
+      const mode = plan.action === 'fallback' ? 'fallback' : 'retry';
 
       // open() 会把已经设过的请求头清空，所以必须把记下来的重新应用一遍。
       // withCredentials / responseType / timeout 不受 open() 影响，无需重设
@@ -314,7 +317,7 @@
           // 非法头名（页面自己设的时候也会被拒），跳过这一条继续
         }
       }
-      watchOutcome(xhr, state.url, 'xhr', 'retry');
+      watchOutcome(xhr, state.url, 'xhr', mode);
       nativeSend.call(xhr, null);
     } finally {
       state.busy = false;
@@ -409,17 +412,12 @@
       const plan = await requestPlan(url, 'image');
       if (!plan) return;
 
-      if (plan.action === 'retry') {
-        watchOutcome(img, url, 'image', 'retry');
-        // 给 src 赋值（哪怕是同一个值）会触发 HTML 规范的 "update the image data"，
-        // 于是发出一个全新的请求，PAC 轮询下标已经前进（决策 D20）
-        img.src = img.src;
-      } else if (plan.url) {
-        // Image 是唯一能用兜底图片代理的一条路 —— 它取的确实是一张图
-        watchOutcome(img, url, 'image', 'fallback');
-        img.removeAttribute('srcset');
-        img.src = plan.url;
-      }
+      // 重试与兜底在页面这一侧是同一个动作：原地重新请求同一个地址。
+      // 给 src 赋值（哪怕是同一个值）会触发 HTML 规范的 "update the image data"，
+      // 于是发出一个全新的请求，PAC 轮询下标已经前进（决策 D20）；兜底那一路
+      // 后台已经把这个源临时指向了兜底代理。mode 仍要分开，否则统计分不出两者
+      watchOutcome(img, url, 'image', plan.action === 'fallback' ? 'fallback' : 'retry');
+      img.src = img.src;
     } finally {
       imageBusy.delete(img);
     }

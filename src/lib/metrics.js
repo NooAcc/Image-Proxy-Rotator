@@ -101,8 +101,14 @@ export function emptyMetrics() {
        */
       deep: 0,
     },
-    /** 兜底图片代理：轮询节点全试过之后接手了多少次，以及它自己的成败 */
-    fallbackImage: { used: 0, ok: 0, fail: 0 },
+    /**
+     * 兜底代理：轮询节点全试过之后接手了多少次，以及它自己的成败。
+     *
+     * `cooldown` 是第四个口径，1.5.0 新增：该源正处在冷却期，于是这次用尽**没有**
+     * 交给兜底。不单列它，用户会看到「用尽仍失败」在涨而「兜底接管」不动，读起来
+     * 像兜底坏了 —— 实际是冷却在按设计抑制它。
+     */
+    fallbackProxy: { used: 0, ok: 0, fail: 0, cooldown: 0 },
 
     /** @type {Record<string, {used: number, ok: number, fail: number}>} */
     perNode: {},
@@ -138,7 +144,7 @@ export function normalizeMetrics(raw) {
     for (let i = 0; i < BUCKET_COUNT; i++) base.latency[i] = count(raw.latency[i]);
   }
 
-  for (const bucket of ['retry', 'fallbackImage']) {
+  for (const bucket of ['retry', 'fallbackProxy']) {
     if (raw[bucket] && typeof raw[bucket] === 'object') {
       for (const key of Object.keys(base[bucket])) base[bucket][key] = count(raw[bucket][key]);
     }
@@ -293,19 +299,22 @@ export function noteRetry(metrics, { kind, at } = {}) {
 }
 
 /**
- * 记一次兜底图片代理的动作。
+ * 记一次兜底代理的动作。
  *
- * `used` 与 `ok` / `fail` 是两个时刻：改写地址时记 used，浏览器加载完之后内容脚本
+ * `used` 与 `ok` / `fail` 是两个时刻：开窗放行时记 used，浏览器加载完之后内容脚本
  * 再回报一次成败。所以 `used` 会先于 `ok + fail` 增长，短暂对不上是正常的。
  *
+ * `cooldown` 与三者都不重叠：它记的是「本该交给兜底，但该源在冷却期，于是没交」。
+ *
  * @param {object} metrics 就地修改
- * @param {{used?: boolean, ok?: ?boolean, at?: number}} event
+ * @param {{used?: boolean, ok?: ?boolean, cooldown?: boolean, at?: number}} event
  */
-export function noteFallbackImage(metrics, { used = false, ok = null, at } = {}) {
+export function noteFallbackProxy(metrics, { used = false, ok = null, cooldown = false, at } = {}) {
   touch(metrics, at);
-  if (used) metrics.fallbackImage.used++;
-  if (ok === true) metrics.fallbackImage.ok++;
-  else if (ok === false) metrics.fallbackImage.fail++;
+  if (used) metrics.fallbackProxy.used++;
+  if (cooldown) metrics.fallbackProxy.cooldown++;
+  if (ok === true) metrics.fallbackProxy.ok++;
+  else if (ok === false) metrics.fallbackProxy.fail++;
   return metrics;
 }
 
@@ -559,11 +568,14 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       pending: Math.max(0, m.retry.attempted - m.retry.recovered - m.retry.abandoned - m.retry.exhausted),
       recoveryRate: rate(m.retry.recovered, m.retry.attempted),
     },
-    fallbackImage: {
-      used: m.fallbackImage.used,
-      ok: m.fallbackImage.ok,
-      fail: m.fallbackImage.fail,
-      successRate: rate(m.fallbackImage.ok, m.fallbackImage.ok + m.fallbackImage.fail),
+    fallbackProxy: {
+      used: m.fallbackProxy.used,
+      ok: m.fallbackProxy.ok,
+      fail: m.fallbackProxy.fail,
+      // 本该兜底却因为该源在冷却期而没兜的次数。不为零说明轮询池正在持续大面积失败，
+      // 而冷却在按设计抑制「整个图源长期只走一个代理」
+      cooldown: m.fallbackProxy.cooldown,
+      successRate: rate(m.fallbackProxy.ok, m.fallbackProxy.ok + m.fallbackProxy.fail),
     },
 
     nodes: { rows: nodeRows, totalUsed: nodeTotal, retiredUsed: m.retired.nodeUsed, ...sharedHostsOf(nodes) },

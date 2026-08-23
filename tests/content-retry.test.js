@@ -208,7 +208,6 @@ function mount(respond, options = {}) {
 /** 一个「永远回 retry」的后台 */
 const alwaysRetry = () => ({ ok: true, action: 'retry', delayMs: 0 });
 const IMG_URL = 'https://cdn.manga.com/001.jpg';
-const PROXIED = 'https://wsrv.nl/?url=x';
 
 /**
  * 沙箱里造出来的对象跨 realm，原型与宿主的 Object.prototype 不是同一个，
@@ -337,38 +336,46 @@ test('等待期间图片已被移出文档时不再重发', async () => {
 
 // ---------------------------------------------------------------- 兜底
 
-test('回 fallback 就把 src 换成兜底地址', async () => {
-  const page = mount(() => ({ ok: true, action: 'fallback', url: PROXIED, delayMs: 0 }));
+test('回 fallback 就原地重发 —— 兜底是传输层的，页面这侧不改地址', async () => {
+  // 1.4.x 的兜底会把 src 换成 `兜底服务/?url=原图`；1.5.0 起后台把这个源临时指向
+  // 兜底代理，页面要做的和普通重发一模一样。地址一旦被改写，重发就不再是同一张图了
+  const page = mount(() => ({ ok: true, action: 'fallback', delayMs: 0 }));
   const el = img(IMG_URL);
   await page.fail(el);
-  assert.deepEqual(el.srcWrites, [PROXIED]);
-  assert.ok(el.removed.includes('srcset'), 'srcset 不清掉的话它的优先级高于 src');
+  assert.deepEqual(el.srcWrites, [IMG_URL], '重发的必须还是原图地址');
+  assert.ok(!el.removed.includes('srcset'), '不再需要清 srcset —— 那是改写地址时才要做的事');
 });
 
-test('<picture> 里的 <source> 要先清掉，否则赋 src 根本不生效', async () => {
-  const page = mount(() => ({ ok: true, action: 'fallback', url: PROXIED, delayMs: 0 }));
+test('兜底与重试走同一条重发路径 —— <picture> 之类的处理不会有两套', async () => {
+  const page = mount(() => ({ ok: true, action: 'fallback', delayMs: 0 }));
   const source = new StubElement('source');
+  source.srcset = 'https://cdn.manga.com/001.webp';
+  source.srcsetWrites.length = 0;
   const picture = new StubElement('picture');
   picture._sources = [source];
   const el = img(IMG_URL, { parentElement: picture });
+  el.src = '';
+  el.currentSrc = 'https://cdn.manga.com/001.webp';
+  el.srcWrites.length = 0;
 
   await page.fail(el);
-  assert.ok(source.removed.includes('srcset'), '<source> 的优先级高于 <img src>');
-  assert.deepEqual(el.srcWrites, [PROXIED]);
+  assert.equal(source.srcsetWrites.length, 1, '与重试同样改 <source> 的 srcset');
+  assert.equal(el.srcWrites.length, 0, '绝不能给 img.src 写空串');
 });
 
-test('兜底地址自己也失败时到此为止，绝不再问 —— 否则会无限套娃', async () => {
+test('兜底那一次也失败时到此为止，绝不再问 —— 否则会没完没了', async () => {
   const page = mount((m) => (m.type === 'imageRetryAsk'
-    ? { ok: true, action: 'fallback', url: PROXIED, delayMs: 0 }
+    ? { ok: true, action: 'fallback', delayMs: 0 }
     : { ok: true }));
   const el = img(IMG_URL);
   await page.fail(el);
   assert.equal(page.asks().length, 1);
 
-  el.currentSrc = PROXIED;
+  // 地址从头到尾没变过，所以「别再问了」只能靠上一轮的 mode 判定
   await page.fail(el);
   assert.equal(page.asks().length, 1, '兜底失败之后不该再发起新的询问');
-  assert.deepEqual(plain(page.results().at(-1)), { type: 'imageRetryResult', url: PROXIED, kind: 'fallback', ok: false });
+  assert.deepEqual(plain(page.results().at(-1)),
+    { type: 'imageRetryResult', url: IMG_URL, kind: 'fallback', ok: false });
 });
 
 // ---------------------------------------------------------------- 回报结果
@@ -542,10 +549,10 @@ test('页面切到后台时，悬空的重发立刻结算', async () => {
 });
 
 test('兜底那一路同样会兜住悬空', async () => {
-  const page = mount(() => ({ ok: true, action: 'fallback', url: PROXIED, delayMs: 0 }));
+  const page = mount(() => ({ ok: true, action: 'fallback', delayMs: 0 }));
   await page.fail(img(IMG_URL));
 
   await page.tick(RETRY_OUTCOME_TIMEOUT_MS + 1);
   assert.deepEqual(plain(page.results().at(-1)),
-    { type: 'imageRetryResult', url: PROXIED, kind: 'fallback', ok: null });
+    { type: 'imageRetryResult', url: IMG_URL, kind: 'fallback', ok: null });
 });

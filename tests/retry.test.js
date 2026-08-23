@@ -15,18 +15,13 @@ import assert from 'node:assert/strict';
 
 import { classifyFailure, isRetriableKind, decideRetry } from '../src/lib/retry.js';
 
-const TEMPLATE = 'https://wsrv.nl/?url={url}';
-const URL_A = 'https://cdn.manga.com/001.jpg';
-
 /** decideRetry 的默认入参，逐条测试只覆盖自己关心的那个字段 */
 const base = {
-  url: URL_A,
   attempt: 1,
   kind: 'proxy',
   matched: true,
   maxAttempts: 3,
   fallbackEnabled: true,
-  fallbackTemplate: TEMPLATE,
 };
 
 // ---------------------------------------------------------------- 失败原因分类
@@ -104,7 +99,9 @@ test('maxAttempts=3 时第 3 次失败后不再重试，改走兜底', () => {
   assert.equal(decideRetry({ ...base, attempt: 2 }).action, 'retry');
   const third = decideRetry({ ...base, attempt: 3 });
   assert.equal(third.action, 'fallback');
-  assert.equal(third.url, `https://wsrv.nl/?url=${encodeURIComponent(URL_A)}`);
+  // 1.5.0 起兜底是传输层的：后台把该源临时指向兜底代理，页面原地重发同一个地址。
+  // 判定层因此不该产出任何地址 —— 会产出地址的那一版是 URL 改写型兜底
+  assert.equal(third.url, undefined, '兜底不再改写地址');
 });
 
 test('maxAttempts=1 表示不重试，第一次失败就直接走兜底', () => {
@@ -118,8 +115,10 @@ test('没配兜底时用尽次数即放弃，理由是 exhausted', () => {
   assert.equal(out.reason, 'exhausted');
 });
 
-test('兜底模板非法时同样只是放弃，不会产出一个坏地址', () => {
-  const out = decideRetry({ ...base, attempt: 3, fallbackTemplate: 'https://wsrv.nl/' });
+test('兜底那一次也失败之后不再套娃 —— attempt 超过上限就只能放弃', () => {
+  // 防递归靠次数，不靠地址形状。1.4.x 用 isProxiedUrl 判「这个地址是不是兜底服务给的」，
+  // 那是 URL 改写型兜底才需要的；现在地址从头到尾没变过，只能看 attempt
+  const out = decideRetry({ ...base, attempt: 4 });
   assert.equal(out.action, 'give-up');
   assert.equal(out.reason, 'exhausted');
 });
@@ -148,10 +147,13 @@ test('原因不明时即使已经用尽次数也不走兜底', () => {
   assert.equal(out.reason, 'unknown-cause');
 });
 
-test('已经是兜底地址的图片不再改写，避免无限套娃', () => {
-  const proxied = `https://wsrv.nl/?url=${encodeURIComponent(URL_A)}`;
-  const out = decideRetry({ ...base, url: proxied, attempt: 3 });
-  assert.equal(out.action, 'give-up');
+test('判定层不看地址 —— 同一个 URL 反复进来，结论只由 attempt 决定', () => {
+  // 1.4.x 的兜底会把地址改写成 `兜底服务/?url=原图`，于是判定层必须认出「这已经是
+  // 兜底地址了」才能防住套娃。现在地址从头到尾没变过，判定层压根不需要 url 这个入参 ——
+  // 这条用来钉住那个简化：传不传 url 都不该影响结论
+  assert.equal(decideRetry({ ...base, attempt: 3 }).action, 'fallback');
+  assert.equal(decideRetry({ ...base, attempt: 3, url: 'https://whatever/x.jpg' }).action, 'fallback');
+  assert.equal(decideRetry({ ...base, attempt: 4 }).action, 'give-up');
 });
 
 test('attempt 非法时按第一次处理，不会因为脏输入直接放弃', () => {

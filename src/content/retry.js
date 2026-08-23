@@ -200,26 +200,6 @@
     else img.src = url;
   }
 
-  /**
-   * 强制这张图去取指定地址（只用于兜底）。
-   *
-   * `<picture>` 里 `<source>` 的优先级高于 `<img src>`，所以不先把兄弟 `<source>` 的
-   * srcset 清掉的话，赋 `img.src` 根本不会生效 —— 浏览器仍然会去选那个已经失败的源。
-   * 这是一次真实的 DOM 改动，但走到兜底这一步说明原来那些源已经全都取不到了。
-   */
-  function forceSrc(img, url) {
-    const picture = img.parentElement;
-    if (picture && picture.tagName === 'PICTURE') {
-      for (const source of picture.querySelectorAll('source')) {
-        source.removeAttribute('srcset');
-        source.removeAttribute('src');
-      }
-    }
-    img.removeAttribute('srcset');
-    img.removeAttribute('sizes');
-    img.src = url;
-  }
-
   function watch(img, mode, url) {
     const state = { img, mode, url, timer: 0 };
     // 超时是这条链路唯一的兜底：load 与 error 都不来的时候，只有它能给出结论
@@ -335,15 +315,14 @@
         return;
       }
 
-      if (plan.action === 'retry') {
-        watch(img, 'retry', url);
-        reload(img, url);
-        dbg('resent', { url, attempt, waitedMs: Number.isFinite(delay) ? delay : 0 });
-      } else {
-        watch(img, 'fallback', plan.url);
-        forceSrc(img, plan.url);
-        dbg('fallback-sent', { url, target: plan.url, attempt });
-      }
+      // 重试与兜底在这里是**同一个动作**：都是原地重新请求同一个地址。
+      // 差别全在后台 —— 兜底那一路，后台已经把这个图源临时指向了兜底代理
+      // （1.5.0 起兜底是传输层的；1.4.x 那会儿它是 URL 改写，所以这里要改地址）。
+      // mode 仍然要分开，否则统计分不出「换节点救回」和「兜底救回」
+      watch(img, plan.action === 'fallback' ? 'fallback' : 'retry', url);
+      reload(img, url);
+      dbg(plan.action === 'fallback' ? 'fallback-sent' : 'resent',
+        { url, attempt, waitedMs: Number.isFinite(delay) ? delay : 0 });
     } finally {
       inflight--;
       asking.delete(img);

@@ -104,7 +104,8 @@ test('未来版本号不崩溃，按当前版本尽力读取', () => {
 test('默认配置带上重试与兜底，且兜底默认不启用', () => {
   const s = normalizeConfig({}).settings;
   assert.deepEqual(s.retry, { maxAttempts: 3, delayMs: 300 });
-  assert.deepEqual(s.fallbackImage, { enabled: false, template: '' });
+  assert.deepEqual(s.fallbackProxy,
+    { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' });
 });
 
 test('新装默认「不直连」—— 否则重试、深度重试、兜底三样一次都不会触发', () => {
@@ -141,28 +142,55 @@ test('重试设置缺失或是垃圾时回落到默认值', () => {
   }
 });
 
-test('兜底模板合法时可以启用', () => {
+test('兜底代理地址可用时可以启用，并被拆成 host/port', () => {
   const fb = normalizeConfig({
-    settings: { fallbackImage: { enabled: true, template: '  https://wsrv.nl/?url={url}  ' } },
-  }).settings.fallbackImage;
+    settings: { fallbackProxy: { enabled: true, raw: '  http://10.0.0.3:37581  ' } },
+  }).settings.fallbackProxy;
   assert.equal(fb.enabled, true);
-  assert.equal(fb.template, 'https://wsrv.nl/?url={url}', '两端空白要去掉，否则 new URL 会失败');
+  assert.equal(fb.raw, 'http://10.0.0.3:37581', '两端空白要去掉，否则 new URL 会失败');
+  assert.equal(fb.host, '10.0.0.3');
+  assert.equal(fb.port, 37581);
 });
 
-test('模板非法时强制关闭，但保留用户填的文本', () => {
-  // 强制关闭是因为「开关开着、实际什么都不会发生」正是本项目反复吃过亏的那类静默失败；
-  // 保留文本是为了不把用户填了一半的东西抹掉，设置页会就地说明它为什么没被启用
-  for (const template of ['https://wsrv.nl/', 'ftp://x/{url}', '', 'not a url {url}']) {
-    const fb = normalizeConfig({ settings: { fallbackImage: { enabled: true, template } } }).settings.fallbackImage;
-    assert.equal(fb.enabled, false, `${template} 不该被启用`);
-    assert.equal(fb.template, template.trim(), '用户填的文本不该被抹掉');
+test('没写 scheme 时按 http 处理 —— 与节点的填写语法保持一致', () => {
+  const fb = normalizeConfig({
+    settings: { fallbackProxy: { enabled: true, raw: '10.0.0.3:37581' } },
+  }).settings.fallbackProxy;
+  assert.equal(fb.enabled, true);
+  assert.equal(fb.protocol, 'http');
+  assert.equal(fb.port, 37581);
+});
+
+test('地址里的凭据被解出来，不必再填一遍', () => {
+  const fb = normalizeConfig({
+    settings: { fallbackProxy: { enabled: true, raw: 'https://u:p%40ss@proxy.lan:8443' } },
+  }).settings.fallbackProxy;
+  assert.equal(fb.username, 'u');
+  assert.equal(fb.password, 'p@ss', '百分号编码要还原，否则密码是错的');
+});
+
+test('地址不可用时强制关闭，但保留用户填的原文', () => {
+  // 强制关闭是因为「开关开着、实际什么都不会发生」正是本项目反复吃过亏的那类静默失败。
+  // 1.4.x 的兜底图片代理就栽在这里：一个 HTTP 正向代理填进 `?url=` 模板框，三项校验
+  // 全过、真用到时每次 400。保留原文是为了让设置页能就地说明它为什么没被启用
+  for (const raw of [
+    'socks5://10.0.0.3:1080',            // 协议不支持
+    'http://10.0.0.3:37581/?url={url}',  // 这是 1.4.x 的改写型模板，不是代理
+    'http://10.0.0.3:99999',             // 端口越界
+    'http://:37581',                     // 缺主机名
+    'not a url',                         // 有空格
+  ]) {
+    const fb = normalizeConfig({ settings: { fallbackProxy: { enabled: true, raw } } }).settings.fallbackProxy;
+    assert.equal(fb.enabled, false, `${raw} 不该被启用`);
+    assert.equal(fb.raw, raw, '用户填的原文不该被抹掉');
   }
 });
 
 test('兜底设置本身是垃圾时回落到默认值，不让整份配置失效', () => {
-  for (const fallbackImage of [undefined, null, 'x', 42, []]) {
-    const fb = normalizeConfig({ settings: { fallbackImage } }).settings.fallbackImage;
-    assert.deepEqual(fb, { enabled: false, template: '' });
+  for (const fallbackProxy of [undefined, null, 'x', 42, []]) {
+    const fb = normalizeConfig({ settings: { fallbackProxy } }).settings.fallbackProxy;
+    assert.deepEqual(fb,
+      { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' });
   }
 });
 
@@ -170,11 +198,12 @@ test('重试与兜底设置能跟着配置导出再导入', () => {
   const cfg = normalizeConfig({
     settings: {
       retry: { maxAttempts: 5, delayMs: 0 },
-      fallbackImage: { enabled: true, template: 'https://p.example/?u={raw}' },
+      fallbackProxy: { enabled: true, raw: 'http://10.0.0.3:37581' },
     },
   });
   const back = importConfig(exportConfig(cfg), normalizeConfig({}), { merge: false });
   assert.deepEqual(back.settings.retry, { maxAttempts: 5, delayMs: 0 });
-  assert.equal(back.settings.fallbackImage.enabled, true);
-  assert.equal(back.settings.fallbackImage.template, 'https://p.example/?u={raw}');
+  assert.equal(back.settings.fallbackProxy.enabled, true);
+  assert.equal(back.settings.fallbackProxy.raw, 'http://10.0.0.3:37581');
+  assert.equal(back.settings.fallbackProxy.port, 37581);
 });

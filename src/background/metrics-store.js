@@ -21,7 +21,7 @@ import {
   noteProbe,
   noteApply,
   noteRetry,
-  noteFallbackImage,
+  noteFallbackProxy,
   pruneMetrics,
   summarizeMetrics,
 } from '../lib/metrics.js';
@@ -142,9 +142,9 @@ export async function noteRetryMetric(event) {
   schedule();
 }
 
-/** 记一次兜底图片代理的动作（改写地址 / 加载成败） */
-export async function noteFallbackImageMetric(event) {
-  noteFallbackImage(await load(), event);
+/** 记一次兜底代理的动作（开窗放行 / 加载成败 / 冷却期跳过） */
+export async function noteFallbackProxyMetric(event) {
+  noteFallbackProxy(await load(), event);
   schedule();
 }
 

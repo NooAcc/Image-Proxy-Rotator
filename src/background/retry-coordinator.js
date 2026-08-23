@@ -11,9 +11,13 @@
 
 import { decideRetry } from '../lib/retry.js';
 import { matchPacUrl } from '../lib/rule-matcher.js';
+import { fallbackProxyToken } from '../lib/fallback-proxy.js';
+import { FALLBACK_WINDOW_MS } from '../lib/constants.js';
 import { getConfig, getLogger, queueRuntimeSave } from './state.js';
 import { observedFailure, forgetFailure, noteRetryAsked } from './request-logger.js';
-import { noteRetryMetric, noteFallbackImageMetric } from './metrics-store.js';
+import { noteRetryMetric, noteFallbackProxyMetric } from './metrics-store.js';
+import { openFallbackWindow, abortFallbackWindow } from './fallback-window.js';
+import { applyProxy } from './proxy-controller.js';
 import { dbg } from './debug-store.js';
 
 /**
@@ -60,7 +64,9 @@ const GIVE_UP_TEXT = {
   'not-routed': '该地址不匹配任何启用的规则，不是本扩展路由出去的，不干预',
   'not-proxy-failure': '失败原因不是代理故障（多为图源返回 4xx/5xx），换代理也是同样结果',
   'unknown-cause': '查不到这次失败的原因，保守起来不重试',
-  exhausted: '已用尽可尝试的节点，且没有可用的兜底图片代理',
+  exhausted: '已用尽可尝试的节点，且兜底代理未启用或不可用',
+  cooldown: '已用尽可尝试的节点，而该图源刚用过兜底代理、正处在冷却期',
+  'fallback-failed': '已用尽可尝试的节点，而切换到兜底代理时注入分流脚本失败',
 };
 
 /**
@@ -93,7 +99,7 @@ export async function planRetry({ url, attempt, via } = {}) {
   if (typeof url !== 'string' || !url) return give('not-routed');
 
   const retry = config.settings.retry;
-  const fallbackImage = config.settings.fallbackImage;
+  const fallbackProxy = config.settings.fallbackProxy;
 
   // 「这张图是本扩展路由出去的吗」必须用 matchPacUrl 而不是 matchUrl：后者按完整 URL
   // 判定，而浏览器交给 PAC 的 https URL 已被剥掉 path 与 query（决策 D16）。用 matchUrl
@@ -119,20 +125,15 @@ export async function planRetry({ url, attempt, via } = {}) {
   }
   if (!kind) kind = 'unknown';
 
-  // 兜底是**图片**代理：把一个 JSON 接口套进 `?url=` 里毫无意义，而 fetch / XHR 这两条路
-  // 分不出取的是图还是数据。所以只有 `<img>` 与 `new Image()` 能走到兜底 —— 其余在这里就
-  // 把兜底关掉，让判定落到 `exhausted`。若只在补丁那侧挡，`planRetry` 会先把
-  // `fallbackImage.used` 记上一笔，面板于是显示「兜底用了 N 次」而它一次都没被用过
-  const canFallback = via !== 'fetch' && via !== 'xhr';
-
+  // 1.5.0 起兜底是**传输层**的：后台把这个源临时指向兜底代理，页面原地重发即可。
+  // 于是它对 fetch / XHR 与对 `<img>` 一样有效 —— 旧的 URL 改写型兜底做不到这一点
+  // （把一个 JSON 接口套进 `?url=` 毫无意义），所以那时这里按 via 把兜底关掉了。
   const plan = decideRetry({
-    url,
     attempt,
     kind,
     matched: true,
     maxAttempts: retry.maxAttempts,
-    fallbackEnabled: canFallback && fallbackImage.enabled,
-    fallbackTemplate: fallbackImage.template,
+    fallbackEnabled: Boolean(fallbackProxyToken(fallbackProxy)),
   });
 
   // 判定的入参与结论一次记全。少记一项，事后就只能靠猜「当时 observedFailure 查到了吗」
@@ -147,9 +148,7 @@ export async function planRetry({ url, attempt, via } = {}) {
       via: via ?? 'img',
       maxAttempts: retry.maxAttempts,
       delayMs: retry.delayMs,
-      fallbackEnabled: fallbackImage.enabled,
-      fallbackOffered: canFallback && fallbackImage.enabled,
-      fallbackUrl: plan.url ?? null,
+      fallbackEnabled: Boolean(fallbackProxyToken(fallbackProxy)),
     });
   }
 
@@ -169,22 +168,7 @@ export async function planRetry({ url, attempt, via } = {}) {
     return { action: 'retry', delayMs: retry.delayMs };
   }
 
-  if (plan.action === 'fallback') {
-    // exhausted 与 fallbackImage.used 是两个口径：前者数「轮询节点都试过了」，
-    // 后者数「其中有多少次真的交给了兜底」。exhausted >= used 恒成立
-    await noteRetryMetric({ kind: 'exhausted', at: Date.now() });
-    await noteFallbackImageMetric({ used: true, at: Date.now() });
-    if (shouldSpeak(`${hostOf(url)}|fallback`)) {
-      log.add({
-        level: 'warn',
-        kind: 'request',
-        message: `${hostOf(url)} 的图片在 ${retry.maxAttempts} 个节点上都失败了，改用兜底图片代理。`
-          + '注意：兜底服务会拿到图片地址。',
-      });
-    }
-    queueRuntimeSave();
-    return { action: 'fallback', url: plan.url, delayMs: retry.delayMs };
-  }
+  if (plan.action === 'fallback') return dispatchFallback({ url, retry, log });
 
   // 走到这里的一定是「你的图片」（不归本扩展管的已经在上面提前返回了）。
   // 用尽了却没兜底算 exhausted，其余算 skipped —— 后者的含义是
@@ -199,6 +183,73 @@ export async function planRetry({ url, attempt, via } = {}) {
     queueRuntimeSave();
   }
   return { action: 'give-up', reason: plan.reason };
+}
+
+/**
+ * 把这个源切到兜底代理，然后让页面原地重发。
+ *
+ * **三件事的顺序不能换。** 先开窗（拿到「该不该切」的裁决），再注入 PAC（真的切过去），
+ * 最后才回复页面。反过来 —— 先回复再注入 —— 页面就可能在 PAC 还没换上时就重发，
+ * 那一次会落到普通轮询节点上，却被记成一次兜底：统计说谎，而用户完全无从发现。
+ *
+ * `exhausted` 无论切没切成都要记：它的含义是「轮询节点都试过了」，与兜底接不接手无关
+ * （`exhausted >= fallbackProxy.used` 因此恒成立）。
+ */
+async function dispatchFallback({ url, retry, log }) {
+  const opened = openFallbackWindow(url);
+
+  if (!opened.ok) {
+    await noteRetryMetric({ kind: 'exhausted', at: Date.now() });
+    if (opened.reason === 'cooldown') {
+      await noteFallbackProxyMetric({ cooldown: true, at: Date.now() });
+      if (shouldSpeak(`${hostOf(url)}|cooldown`)) {
+        log.add({
+          level: 'warn',
+          kind: 'request',
+          message: `${hostOf(url)} 的图片在 ${retry.maxAttempts} 个节点上都失败了，`
+            + '但该图源刚用过兜底代理、正处在冷却期，这次不再切换。'
+            + '冷却是刻意的：否则轮询池持续失败时整个图源会长期只走兜底代理那一个 IP。',
+        });
+        queueRuntimeSave();
+      }
+      return { action: 'give-up', reason: 'cooldown' };
+    }
+    return { action: 'give-up', reason: 'exhausted' };
+  }
+
+  // 窗口已经开着说明这个源本来就指向兜底代理了，不必也不该重注入一遍 PAC ——
+  // 一次大面积失败会让几十张图同时走到这里
+  if (!opened.reused) {
+    const applied = await applyProxy();
+    if (!applied.applied) {
+      // 窗口记着「已开」而 PAC 里其实没有对应条目，是最糟的状态：下一张图会因为
+      // 「窗口已开」直接重发，落到普通节点上却被记成兜底。必须把窗口撤回去
+      abortFallbackWindow(opened.origin);
+      await noteRetryMetric({ kind: 'exhausted', at: Date.now() });
+      log.add({
+        level: 'error',
+        kind: 'request',
+        message: `${hostOf(url)} 的图片本该切到兜底代理，但注入分流脚本失败，已放弃这张图。`
+          + '请到设置页检查代理设置的控制权是否被其他扩展占用。',
+      });
+      queueRuntimeSave();
+      return { action: 'give-up', reason: 'fallback-failed' };
+    }
+  }
+
+  await noteRetryMetric({ kind: 'exhausted', at: Date.now() });
+  await noteFallbackProxyMetric({ used: true, at: Date.now() });
+  if (shouldSpeak(`${hostOf(url)}|fallback`)) {
+    log.add({
+      level: 'warn',
+      kind: 'request',
+      message: `${hostOf(url)} 的图片在 ${retry.maxAttempts} 个节点上都失败了，已切到兜底代理。`
+        + `注意：浏览器只把「协议+域名」交给分流脚本，所以接下来 ${Math.round(FALLBACK_WINDOW_MS / 1000)} 秒内`
+        + '这个图源的**所有**请求都会走兜底代理，不只是这一张图。',
+    });
+  }
+  queueRuntimeSave();
+  return { action: 'fallback', delayMs: retry.delayMs };
 }
 
 /**
@@ -241,7 +292,7 @@ export async function noteRetryOutcome({ url, kind, ok, via } = {}) {
   }
 
   if (kind === 'fallback') {
-    await noteFallbackImageMetric({ ok: succeeded, at: Date.now() });
+    await noteFallbackProxyMetric({ ok: succeeded, at: Date.now() });
   } else if (succeeded) {
     await noteRetryMetric({ kind: 'recovered', at: Date.now() });
   }

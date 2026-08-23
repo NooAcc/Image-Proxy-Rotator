@@ -11,9 +11,9 @@ import {
   STRATEGIES, FALLBACKS, DEFAULT_PROBE_URL, DEFAULT_BYPASS_LIST,
   RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS,
   defaultConfig, defaultSettings, defaultProbeSettings,
-  defaultRetrySettings, defaultFallbackImage, defaultDeepRetry,
+  defaultRetrySettings, defaultFallbackProxy, defaultDeepRetry,
 } from './constants.js';
-import { validateTemplate } from './image-proxy.js';
+import { parseFallbackProxy } from './fallback-proxy.js';
 import { deepRetryPatterns, DEEP_RETRY_SITE_CAP } from './deep-retry.js';
 import { stableId, isValidId } from './hash.js';
 
@@ -174,27 +174,40 @@ export function normalizeRetrySettings(raw) {
 }
 
 /**
- * 规范化兜底图片代理设置。
+ * 规范化兜底代理设置。
  *
- * **模板非法时强制 enabled=false，但保留用户填的文本。** 两件事各有理由：
+ * **地址不可用时强制 enabled=false，但保留用户填的原文。** 两件事各有理由：
  * 强制关闭是为了不让「开关显示开着、实际什么都不会发生」这种状态被持久化 ——
- * 那正是本项目反复吃过亏的那类静默失败；保留文本是为了不把用户填了一半的东西
- * 抹掉，设置页会在字段旁边直接说明它为什么没被启用。
+ * 那正是 1.4.x 的兜底图片代理踩过的坑（把一个 HTTP 正向代理填进 `?url=` 模板框，
+ * 校验三项全过、真用到时每次 400）；保留原文是为了让设置页能在字段旁边说明
+ * 它为什么没被启用，而不是把用户填的东西默默抹掉。
  */
-export function normalizeFallbackImage(raw) {
-  const base = defaultFallbackImage();
+export function normalizeFallbackProxy(raw) {
+  const base = defaultFallbackProxy();
   if (!isPlainObject(raw)) return base;
-  const template = asString(raw.template).trim();
+
+  // 原文是权威来源：解析一遍就能同时得到 host/port/凭据与「能不能用」的结论，
+  // 不必信任存储里那几个可能被手改坏的分解字段
+  const text = asString(raw.raw).trim()
+    || (raw.host ? `${asString(raw.protocol) || 'http'}://${asString(raw.host)}:${raw.port}` : '');
+  if (!text) return base;
+
+  const parsed = parseFallbackProxy(text);
+  if (!parsed.ok) return { ...base, raw: text };
+
   return {
-    enabled: raw.enabled === true && validateTemplate(template).ok,
-    template,
+    ...parsed.value,
+    // 凭据不写在地址里时（设置页有单独的输入框）仍要保住
+    username: parsed.value.username || asString(raw.username),
+    password: parsed.value.password || asString(raw.password),
+    enabled: raw.enabled === true,
   };
 }
 
 /**
  * 规范化深度重试设置。
  *
- * 与 `normalizeFallbackImage` 同一条纪律：**一条可用站点都没有时强制 `enabled=false`，
+ * 与 `normalizeFallbackProxy` 同一条纪律：**一条可用站点都没有时强制 `enabled=false`，
  * 但保留用户填的文本。** 强制关闭是为了不把「开关显示开着、实际一个页面都不会被注入」
  * 这种状态持久化；保留文本是为了让设置页能逐行说明每一条为什么没被接受
  * （原因由 `deepRetryPatterns()` 给出）。
@@ -226,7 +239,7 @@ export function normalizeSettings(raw) {
     fallback: FALLBACKS.includes(raw.fallback) ? raw.fallback : base.fallback,
     rotateEvery: clampInt(raw.rotateEvery, 1, 1000, base.rotateEvery),
     retry: normalizeRetrySettings(raw.retry),
-    fallbackImage: normalizeFallbackImage(raw.fallbackImage),
+    fallbackProxy: normalizeFallbackProxy(raw.fallbackProxy),
     deepRetry: normalizeDeepRetry(raw.deepRetry),
     probe: normalizeProbeSettings(raw.probe),
     logLimit: clampInt(raw.logLimit, 10, 2000, base.logLimit),

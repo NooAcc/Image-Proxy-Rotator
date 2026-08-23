@@ -283,7 +283,7 @@ function renderMetrics(box) {
   // 一格都不显示的话，用户在弹窗里看到的成功率会莫名其妙地比以前低 ——
   // 重发是一次全新的请求，会被如实计进上面的总量
   const retry = metrics.retry;
-  const fb = metrics.fallbackImage;
+  const fb = metrics.fallbackProxy;
   box.append(section('重试与兜底',
     el('dl', { class: 'kpis' },
       kpi({ label: '重试', value: retry.attempted, unit: '次' }),

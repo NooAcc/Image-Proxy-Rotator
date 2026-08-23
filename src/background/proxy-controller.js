@@ -10,7 +10,34 @@ import { isAscii } from '../lib/ascii.js';
 import { getConfig, getRuntime, getLogger, saveRuntime } from './state.js';
 import { noteApplyMetric } from './metrics-store.js';
 import { syncDeepRetryScripts } from './deep-retry-injector.js';
+import { fallbackForceEntries, nextFallbackExpiry } from './fallback-window.js';
 import { dbg } from './debug-store.js';
+
+
+/**
+ * 兜底窗口到点后把 PAC 换回干净的那一份。
+ *
+ * **这只是清理，不是正确性依赖。** PAC 里的 `until` 已经让过期条目自己失效了
+ * （见 pac-generator 的 `data.force` 注释）—— 这个定时器没跑成，最坏结果只是 PAC 里
+ * 多挂着一条已经不生效的条目，等下一次 applyProxy 顺手带走。
+ */
+let cleanupTimer = null;
+
+function scheduleFallbackCleanup() {
+  if (cleanupTimer) {
+    clearTimeout(cleanupTimer);
+    cleanupTimer = null;
+  }
+  const expiry = nextFallbackExpiry();
+  if (expiry === null) return;
+  // 多等 250ms 再换，避免和 PAC 自己的过期判定卡在同一毫秒上反复横跳
+  cleanupTimer = setTimeout(() => {
+    cleanupTimer = null;
+    void applyProxy();
+  }, Math.max(0, expiry - Date.now()) + 250);
+  // Node 下跑测试时别让待触发的定时器吊住进程
+  if (typeof cleanupTimer?.unref === 'function') cleanupTimer.unref();
+}
 
 
 /** 读取当前代理设置的控制权 */
@@ -76,7 +103,7 @@ export async function applyProxy() {
   const startIndex = summary.poolTokenCount > 0 ? runtime.startIndex % summary.poolTokenCount : 0;
   runtime.startIndex = startIndex + 1;
 
-  const pac = generatePac(config, { startIndex });
+  const pac = generatePac(config, { startIndex, forceEntries: fallbackForceEntries(config) });
 
   // PAC 内部发生的事这里一个字都看不到（没有 console、没有回传通道，见 LIMITATIONS）。
   // 能记的只有「编译出了什么」—— 逐请求选了哪个节点只能靠 request 里的对端 IP 反推
@@ -89,6 +116,7 @@ export async function applyProxy() {
       startIndex,
       skippedNodes: summary.skipped.nodes.length,
       skippedRules: summary.skipped.rules.length,
+      forced: fallbackForceEntries(config).length,
     });
   }
 
@@ -151,6 +179,7 @@ export async function applyProxy() {
   });
 
   await saveRuntime();
+  scheduleFallbackCleanup();
   return { applied: true, summary, control };
 }
 
@@ -158,7 +187,10 @@ export async function applyProxy() {
 export async function previewPac() {
   const config = await getConfig();
   return {
-    pac: generatePac(config, { startIndex: getRuntime().startIndex }),
+    pac: generatePac(config, {
+      startIndex: getRuntime().startIndex,
+      forceEntries: fallbackForceEntries(config),
+    }),
     summary: pacSummary(config),
   };
 }
@@ -183,7 +215,13 @@ export async function applyProbePac(nodeId) {
     return { ok: false, error: '无法把测速请求定向到该节点（协议不受支持，或测速地址不是合法 URL）' };
   }
 
-  const pac = generatePac(config, { startIndex: getRuntime().startIndex, probeNodeId: nodeId });
+  const pac = generatePac(config, {
+    startIndex: getRuntime().startIndex,
+    probeNodeId: nodeId,
+    // 测速期间兜底窗口照旧有效：探针条目排在 force 表最前面，测速优先，
+    // 但没道理让一次测速把正在生效的兜底窗口静默掐掉
+    forceEntries: fallbackForceEntries(config),
+  });
   if (!isAscii(pac)) {
     return { ok: false, error: '内部错误：测速用的分流脚本含非 ASCII 字符' };
   }

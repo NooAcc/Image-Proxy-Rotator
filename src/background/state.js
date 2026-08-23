@@ -50,7 +50,7 @@ export async function getConfig() {
         strategy: cache.settings.strategy,
         fallback: cache.settings.fallback,
         retry: cache.settings.retry,
-        fallbackImage: cache.settings.fallbackImage.enabled,
+        fallbackProxy: cache.settings.fallbackProxy.enabled,
       });
     }
   }

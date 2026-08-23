@@ -24,8 +24,9 @@ const { handleMessage } = await import('../src/background/messaging.js');
 const { installRequestLogger, resetObservedFailures, observedFailure } = await import('../src/background/request-logger.js');
 const { resetMetrics } = await import('../src/background/metrics-store.js');
 const { resetRetryThrottle } = await import('../src/background/retry-coordinator.js');
+const { resetFallbackWindows } = await import('../src/background/fallback-window.js');
 const { normalizeConfig } = await import('../src/lib/schema.js');
-const { FAILURE_TTL_MS, RETRY_ASK_GRACE_MS } = await import('../src/lib/constants.js');
+const { FAILURE_TTL_MS, RETRY_ASK_GRACE_MS, FALLBACK_WINDOW_MS, FALLBACK_COOLDOWN_MS } = await import('../src/lib/constants.js');
 
 assert.equal(installRequestLogger(), true, 'webRequest 监听器应注册成功');
 
@@ -37,15 +38,20 @@ const IMG_URL = 'https://cdn.manga.com/ch1/001.jpg';
 const RULE = { id: 'r_aaaaaaa1', name: '图片', type: 'host', pattern: 'manga.com', enabled: true, nodeIds: [] };
 /** 依赖路径的规则：HTTPS 下 PAC 判定不了，这类图本来就是直连 */
 const BLIND_RULE = { id: 'r_bbbbbbb2', name: '扩展名', type: 'regex', pattern: '\\.jpg$', enabled: true, nodeIds: [] };
-const TEMPLATE = 'https://wsrv.nl/?url={url}';
-const PROXIED = `https://wsrv.nl/?url=${encodeURIComponent(IMG_URL)}`;
+/** 兜底代理：一个普通的 HTTP 正向代理，独立于节点列表 */
+const FALLBACK = { enabled: true, raw: 'http://10.0.0.3:37581' };
+/** 它在 PAC 里应当长成的样子 */
+const FALLBACK_TOKEN = 'PROXY 10.0.0.3:37581';
+/** 兜底窗口按「源」生效，这是 IMG_URL 的源前缀 */
+const IMG_ORIGIN = 'https://cdn.manga.com/';
 
 async function seed(partial = {}) {
   stub.reset();
   resetRetryThrottle();
   // 失败原因表活在模块作用域里，清存储清不掉它。不清的话上一个用例留下的原因
-  // 会漏到下一个用例，让整个文件变成顺序相关的
+  // 会漏到下一个用例，让整个文件变成顺序相关的。兜底窗口同理
   resetObservedFailures();
+  resetFallbackWindows();
   Object.assign(getRuntime(), {
     startIndex: 0, control: null, summary: null, lastApplyAt: null, lastApplyError: null, probing: false,
   });
@@ -149,25 +155,31 @@ test('总开关关闭时回 disabled，内容脚本据此进入冷却而不是�
 
 // ---------------------------------------------------------------- 次数与兜底
 
-test('用尽 maxAttempts 后交给兜底，地址是编码后的原图', async () => {
-  await seed({ settings: { fallbackImage: { enabled: true, template: TEMPLATE } } });
+test('用尽 maxAttempts 后切到兜底代理，页面原地重发（不再改写地址）', async () => {
+  await seed({ settings: { fallbackProxy: FALLBACK } });
   const plan = await askAfter({ error: 'net::ERR_TUNNEL_CONNECTION_FAILED' }, { attempt: 3 });
 
   assert.equal(plan.action, 'fallback');
-  assert.equal(plan.url, PROXIED);
+  assert.equal(plan.url, undefined, '兜底是传输层的，不给页面任何新地址');
+
+  // 真正的切换发生在 PAC 里：该源被强制指向兜底代理
+  const pac = stub.lastPac();
+  assert.ok(pac.includes(FALLBACK_TOKEN), '注入的 PAC 里应当出现兜底代理');
+  assert.ok(pac.includes(IMG_ORIGIN), '强制条目应当按这个源生效');
 
   const m = await view();
   assert.equal(m.retry.exhausted, 1);
-  assert.equal(m.fallbackImage.used, 1);
-  assert.match(await logText(), /兜底服务会拿到图片地址/, '隐私代价必须说出来');
+  assert.equal(m.fallbackProxy.used, 1);
+  // 「按源生效」与用户直觉有差距，必须说出来
+  assert.match(await logText(), /所有.*请求都会走兜底代理/, '连带效应必须写在日志里');
 });
 
-test('exhausted 与 fallbackImage.used 是两个口径，前者 ≥ 后者', async () => {
+test('exhausted 与 fallbackProxy.used 是两个口径，前者 ≥ 后者', async () => {
   await seed();
   await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
   const m = await view();
   assert.equal(m.retry.exhausted, 1, '轮询节点都试过了');
-  assert.equal(m.fallbackImage.used, 0, '但没有兜底可用，所以没人接手');
+  assert.equal(m.fallbackProxy.used, 0, '但没有兜底可用，所以没人接手');
 });
 
 test('没配兜底时用尽次数记成 exhausted 而不是 skipped', async () => {
@@ -179,23 +191,99 @@ test('没配兜底时用尽次数记成 exhausted 而不是 skipped', async () =
 
 test('maxAttempts=1 就是不重试，第一次失败直接走兜底', async () => {
   await seed({
-    settings: {
-      retry: { maxAttempts: 1, delayMs: 0 },
-      fallbackImage: { enabled: true, template: TEMPLATE },
-    },
+    settings: { retry: { maxAttempts: 1, delayMs: 0 }, fallbackProxy: FALLBACK },
   });
   const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 1 });
   assert.equal(plan.action, 'fallback');
   assert.equal(plan.delayMs, 0, '0 毫秒是合法的：用户可以选择不等');
 });
 
-test('模板非法时兜底不生效，也不会产出一个坏地址', async () => {
-  await seed({ settings: { fallbackImage: { enabled: true, template: 'https://wsrv.nl/' } } });
-  assert.equal((await getConfig()).settings.fallbackImage.enabled, false, '规范化时就该关掉它');
+test('兜底地址不可用时兜底不生效，也不会往 PAC 里塞一个坏 token', async () => {
+  // 1.4.x 正是栽在这里：把一个 HTTP 正向代理填进 `?url=` 模板框，校验全过、真用到时每次 400
+  await seed({ settings: { fallbackProxy: { enabled: true, raw: 'socks5://10.0.0.3:1080' } } });
+  assert.equal((await getConfig()).settings.fallbackProxy.enabled, false, '规范化时就该关掉它');
 
   const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
   assert.equal(plan.action, 'give-up');
   assert.equal(plan.reason, 'exhausted');
+  assert.ok(!stub.lastPac()?.includes('1080'), '不可用的兜底代理不该进 PAC');
+});
+
+test('窗口开着时同源的下一张图直接复用，不再重注入一遍 PAC', async () => {
+  // 一次大面积失败会让几十张图同时用尽。每张都重注入一遍 PAC 就是自找的抖动
+  await seed({ settings: { fallbackProxy: FALLBACK } });
+  await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+  const injections = stub.proxyCalls.filter((c) => c.type === 'set').length;
+
+  const second = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { url: `${IMG_URL}?2`, attempt: 3 });
+  assert.equal(second.action, 'fallback', '窗口开着，照样放行');
+  assert.equal(stub.proxyCalls.filter((c) => c.type === 'set').length, injections, '不该再注入一次');
+  assert.equal((await view()).fallbackProxy.used, 2, '但两次都算兜底接管');
+});
+
+test('窗口过期后进入冷却期，用尽的图直接裂掉并单列计数', async (t) => {
+  // 没有冷却，轮询池持续失败时窗口会几乎一直开着 —— 整个图源长期只走兜底代理那一个 IP，
+  // 而这正是本扩展存在意义的反面
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  await seed({ settings: { fallbackProxy: FALLBACK } });
+  await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+
+  await elapse(t, FALLBACK_WINDOW_MS + 1000);
+  resetObservedFailures();
+  const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+
+  assert.equal(plan.action, 'give-up');
+  assert.equal(plan.reason, 'cooldown');
+  const m = await view();
+  assert.equal(m.fallbackProxy.cooldown, 1, '冷却期跳过要单列，否则读起来像兜底坏了');
+  assert.equal(m.fallbackProxy.used, 1, '这一次没有接手');
+  assert.match(await logText(), /冷却/, '为什么没兜底必须说出来');
+});
+
+test('冷却期过完之后可以再开一扇窗', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  await seed({ settings: { fallbackProxy: FALLBACK } });
+  await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+
+  await elapse(t, FALLBACK_WINDOW_MS + FALLBACK_COOLDOWN_MS + 1000);
+  resetObservedFailures();
+  const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+  assert.equal(plan.action, 'fallback');
+});
+
+test('fetch 与 XHR 现在也能兜底 —— 换代理对接口同样有效', async () => {
+  // 1.4.x 的兜底是 URL 改写，把一个 JSON 接口套进 `?url=` 毫无意义，所以那时按 via 关掉了。
+  // 传输层兜底没有这个限制，这条钉住新增的能力
+  for (const via of ['fetch', 'xhr']) {
+    await seed({ settings: { fallbackProxy: FALLBACK } });
+    await stub.emit('onBeforeRequest', { requestId: 'r-1', url: IMG_URL });
+    await stub.emit('onErrorOccurred', { requestId: 'r-1', url: IMG_URL, error: 'net::ERR_CONNECTION_CLOSED' });
+    const plan = await handleMessage({ type: 'imageRetryAsk', url: IMG_URL, attempt: 3, via });
+    assert.equal(plan.action, 'fallback', `${via} 应当也能拿到兜底`);
+  }
+});
+
+test('兜底那一次再失败就到此为止，不会无限套娃', async () => {
+  // 防递归靠 attempt 超限，不靠地址形状 —— 地址从头到尾就没变过
+  await seed({ settings: { fallbackProxy: FALLBACK } });
+  await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+  resetObservedFailures();
+  const again = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 4 });
+  assert.notEqual(again.action, 'fallback');
+  assert.equal(again.reason, 'exhausted');
+});
+
+test('注入失败时不回 fallback，并把窗口撤回去', async () => {
+  // 窗口记着「已开」而 PAC 里其实没有对应条目，是最糟的状态：下一张图会因为
+  // 「窗口已开」直接重发，落到普通节点上却被记成一次兜底
+  await seed({ settings: { fallbackProxy: FALLBACK } });
+  stub.setSettingsError('控制权被别的扩展占用');
+
+  const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+  assert.equal(plan.action, 'give-up');
+  assert.equal(plan.reason, 'fallback-failed');
+  assert.equal((await view()).fallbackProxy.used, 0, '没切成就不能记成用过');
+  assert.match(await logText(), /注入分流脚本失败/);
 });
 
 // ---------------------------------------------------------------- 结果回报
@@ -220,13 +308,13 @@ test('重试仍然失败时不计入 recovered', async () => {
 
 test('兜底的成败单独记账，不混进「重试救回」', async () => {
   await seed();
-  await tell('fallback', true, PROXIED);
-  await tell('fallback', false, PROXIED);
+  await tell('fallback', true);
+  await tell('fallback', false);
 
   const m = await view();
-  assert.equal(m.fallbackImage.ok, 1);
-  assert.equal(m.fallbackImage.fail, 1);
-  assert.equal(m.fallbackImage.successRate, 50);
+  assert.equal(m.fallbackProxy.ok, 1);
+  assert.equal(m.fallbackProxy.fail, 1);
+  assert.equal(m.fallbackProxy.successRate, 50);
   assert.equal(m.retry.recovered, 0, '兜底成功和重试救回是两件事');
 });
 
@@ -259,32 +347,6 @@ test('同一域名的重试日志每分钟只说一次，但计数一次不漏',
     .filter((r) => /换一个节点重发/.test(r.message)).length;
   assert.equal(said, 1, `同一域名每分钟只该说一次，实际说了 ${said} 次`);
   assert.equal((await view()).retry.attempted, 20, '日志节流不影响计数 —— 次数该去统计里看');
-});
-
-test('previewFallbackImage 给出改写结果与兜底服务的源', async () => {
-  await seed();
-  const good = await handleMessage({ type: 'previewFallbackImage', template: TEMPLATE, url: IMG_URL });
-  assert.equal(good.ok, true);
-  assert.equal(good.url, PROXIED);
-  assert.equal(good.origin, 'https://wsrv.nl');
-});
-
-test('previewFallbackImage 对非法输入给出中文原因，而不是抛异常', async () => {
-  await seed();
-  const noPlaceholder = await handleMessage({ type: 'previewFallbackImage', template: 'https://wsrv.nl/', url: IMG_URL });
-  assert.equal(noPlaceholder.ok, false);
-  assert.match(noPlaceholder.error, /\{url\}/);
-
-  const badUrl = await handleMessage({ type: 'previewFallbackImage', template: TEMPLATE, url: 'not-a-url' });
-  assert.equal(badUrl.ok, false);
-  assert.match(badUrl.error, /http/);
-});
-
-test('兜底地址自己失败时不会被再套一层', async () => {
-  // 不拦住的话会套出「兜底/?url=兜底/?url=…」并无限递归下去
-  await seed({ settings: { fallbackImage: { enabled: true, template: TEMPLATE } } });
-  const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { url: PROXIED, attempt: 3 });
-  assert.notEqual(plan.action, 'fallback');
 });
 
 // ---------------------------------------------------------------- 失败原因表
@@ -494,26 +556,26 @@ test('来路不明的 via 不记 deep，也不影响判定', async () => {
   assert.equal((await view()).retry.deep, 0);
 });
 
-test('fetch / XHR 用尽次数后不给兜底 —— 兜底是图片代理，套不住 JSON 接口', async () => {
-  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackImage: { enabled: true, template: TEMPLATE } } });
+test('fetch 用尽次数后照常给兜底 —— 传输层兜底对接口同样有效', async () => {
+  // 1.4.x 的兜底是 URL 改写，把一个 JSON 接口套进 `?url=` 毫无意义，所以那时按 via 关掉了。
+  // 现在兜底是「把这个源指向另一个代理」，对 fetch 与对图片没有任何区别
+  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackProxy: FALLBACK } });
   const plan = await askVia('fetch', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
 
-  assert.equal(plan.action, 'give-up');
-  assert.equal(plan.reason, 'exhausted');
+  assert.equal(plan.action, 'fallback');
+  assert.equal(plan.url, undefined, '不给页面任何新地址');
 
   const m = await view();
   assert.equal(m.retry.exhausted, 1);
-  // 只在补丁那侧挡的话，这里会先记上一笔，面板于是显示「兜底用了 1 次」而它一次都没被用过
-  assert.equal(m.fallbackImage.used, 0, '没用过就不能记，否则统计自己在说谎');
+  assert.equal(m.fallbackProxy.used, 1);
 });
 
-test('new Image() 用尽次数后照常给兜底 —— 它取的确实是一张图', async () => {
-  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackImage: { enabled: true, template: TEMPLATE } } });
+test('new Image() 用尽次数后照常给兜底', async () => {
+  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackProxy: FALLBACK } });
   const plan = await askVia('image', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
 
   assert.equal(plan.action, 'fallback');
-  assert.equal(plan.url, PROXIED);
-  assert.equal((await view()).fallbackImage.used, 1);
+  assert.equal((await view()).fallbackProxy.used, 1);
 });
 
 test('补丁来问同样撤销「页面没捕获」的判定', async () => {

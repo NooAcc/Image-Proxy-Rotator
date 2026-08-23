@@ -361,13 +361,20 @@ test('重发又失败时如实回报 false，并把错误交给页面', async ()
   assert.deepEqual(box.results().map((r) => r.ok), [false]);
 });
 
-test('fetch 拿到 fallback 也当放弃 —— 兜底是图片代理，套不住 JSON 接口', async () => {
-  const box = mount(() => ({ ok: true, action: 'fallback', url: 'http://10.0.0.3:37581/?url=x', delayMs: 0 }));
+test('fetch 拿到 fallback 就照常重发 —— 传输层兜底对接口同样有效', async () => {
+  // 1.4.x 的兜底是 URL 改写，把一个 JSON 接口套进 `?url=` 毫无意义，所以那时这条路
+  // 拿到 fallback 一律放弃。现在兜底是「后台把这个源指向另一个代理」，重发同一个地址即可
+  const box = mount(() => ({ ok: true, action: 'fallback', delayMs: 0 }));
   box.failTimes(API, 1);
 
-  await assert.rejects(() => box.window.fetch(API));
+  const response = await box.window.fetch(API);
   await box.settle();
-  assert.equal(box.requests.length, 1, '绝不能把接口地址塞进图片代理');
+
+  assert.equal(response.ok, true);
+  assert.equal(box.requests.length, 2, '原始一次 + 兜底重发一次');
+  assert.equal(box.requests[1].url, API, '重发的必须还是原地址');
+  assert.deepEqual(box.results().map((r) => [r.via, r.mode, r.ok]), [['fetch', 'fallback', true]],
+    'mode 要分开记，否则统计分不出「换节点救回」和「兜底救回」');
 });
 
 test('桥不回话时等满超时就放弃，不会永远挂着', async () => {
@@ -463,17 +470,18 @@ test('new Image() 失败后重新赋 src —— retry.js 永远看不见这类�
   assert.equal(img.srcWrites[img.srcWrites.length - 1], IMG);
 });
 
-test('Image 是唯一能走兜底图片代理的一条路 —— 它取的确实是一张图', async () => {
-  const fallbackUrl = 'http://10.0.0.3:37581/?url=x';
-  const box = mount(() => ({ ok: true, action: 'fallback', url: fallbackUrl, delayMs: 0 }));
+test('Image 拿到 fallback 也是原地重发，地址不变', async () => {
+  const box = mount(() => ({ ok: true, action: 'fallback', delayMs: 0 }));
   const img = box.newImage();
   img.src = IMG;
+  const before = box.requests.length;
 
   await box.emit(img, 'error');
 
-  assert.equal(img.srcWrites[img.srcWrites.length - 1], fallbackUrl);
-  assert.ok(img.removed.includes('srcset'),
-    'srcset 的优先级高于 src，不清掉的话浏览器仍会去选那个已经失败的源');
+  assert.equal(box.requests.length, before + 1);
+  assert.equal(img.srcWrites[img.srcWrites.length - 1], IMG, '兜底不再改写地址');
+  assert.ok(!img.removed.includes('srcset'), '不再需要清 srcset —— 那是改写地址时才要做的事');
+  assert.deepEqual(box.asks().map((a) => a.via), ['image']);
 });
 
 test('Image 重发成功后回报 true 并清掉次数，下次裂开重新从 1 数起', async () => {

@@ -442,48 +442,90 @@ test('对抗配置下脚本仍可执行且行为正常', () => {
     '绕过列表里的中文域名转码后应生效');
 });
 
-// ---------------------------------------------------------------- 兜底图片代理
+// ---------------------------------------------------------------- 兜底窗口
 
-/** 一条故意写得很宽、会命中兜底服务域名的规则 */
+/** 一条故意写得很宽的规则，用来确认兜底窗口压得过普通轮询 */
 const WIDE = rule({ type: 'regex', pattern: '^https?://' });
 
-test('启用兜底时，兜底服务的域名被自动加进绕过列表', () => {
-  // 兜底存在的前提就是「轮询节点都不好使了」。这时候再把取兜底图的请求送进同一个
-  // 坏池子，等于让最后一道防线跟着一起挂。而用户完全可能写出一条宽泛的规则，
-  // 恰好命中兜底服务的域名 —— 那种失效很难自查，不如在生成器里直接钉死
-  const config = cfg({ rules: [WIDE] });
-  config.settings.fallbackImage = { enabled: true, template: 'https://wsrv.nl/?url={url}' };
-  const pac = loadPac(generatePac(config));
+const FB = 'PROXY fb.px:37581';
+const IMG = browserUrl('https://img.manga.com/1.jpg');
 
-  assert.equal(pac.find(...browserUrl('https://wsrv.nl/?url=x')), 'DIRECT',
-    '兜底服务必须绕过轮询池，否则代理全挂时它也取不到图');
-  assert.match(pac.find(...MANGA), /^PROXY /, '别的域名照旧走代理');
+test('窗口开着时，该源被强制走兜底代理而不是轮询节点', () => {
+  const pac = loadPac(generatePac(cfg(), {
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: Date.now() + 60000 }],
+  }));
+  assert.equal(pac.find(...IMG), FB);
 });
 
-test('兜底没启用时不动绕过列表', () => {
-  const config = cfg({ rules: [WIDE] });
-  config.settings.fallbackImage = { enabled: false, template: 'https://wsrv.nl/?url={url}' };
-  assert.match(loadPac(generatePac(config)).find(...browserUrl('https://wsrv.nl/?url=x')), /^PROXY /);
+test('窗口只管它自己那个源，别的源照旧轮询', () => {
+  const pac = loadPac(generatePac(cfg(), {
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: Date.now() + 60000 }],
+  }));
+  assert.match(pac.find(...MANGA), /^PROXY a\.px|^PROXY b\.px/, 'cdn.manga.com 不在窗口里');
 });
 
-test('模板非法时不会往绕过列表里塞一个 null', () => {
-  const config = cfg({ rules: [WIDE] });
-  config.settings.fallbackImage = { enabled: true, template: 'https://wsrv.nl/' };
-  const pac = generatePac(config);
-  assert.ok(!/null/.test(pac.slice(pac.indexOf('"bypass"'), pac.indexOf('"privates"'))),
-    '绕过列表里不该出现 null');
-  assert.match(loadPac(pac).find(...browserUrl('https://wsrv.nl/x')), /^PROXY /);
+test('until 到点后条目自己失效 —— SW 死在窗口期内也不会把图源永久钉在兜底代理上', () => {
+  // 这是本设计最重要的一条：过期若只靠后台定时器重注入干净 PAC，Service Worker
+  // 在窗口期内被回收就等于「这个源被永久指向兜底代理」，而且没有任何东西会来撤销它
+  const pac = loadPac(generatePac(cfg(), {
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: Date.now() - 1000 }],
+  }));
+  assert.notEqual(pac.find(...IMG), FB, '过期条目不该再生效');
+  assert.match(pac.find(...IMG), /^PROXY a\.px|^PROXY b\.px/, '应当回落到正常轮询');
 });
 
-test('兜底域名是中文时进绕过列表的是 Punycode 形式', () => {
-  // 一个非 ASCII 字节就会让整份 PAC 被浏览器拒收（决策 D13）。
-  // 期望值不写死：Punycode 由 new URL() 算，测试跟着算一遍，免得手写错一个字母
-  const config = cfg({ rules: [WIDE] });
-  config.settings.fallbackImage = { enabled: true, template: 'https://图床.com/?url={url}' };
-  const pac = generatePac(config);
+test('until=0 表示不过期 —— 测速定向靠它，生命周期由调用方显式控制', () => {
+  const pac = loadPac(generatePac(cfg(), {
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: 0 }],
+  }));
+  assert.equal(pac.find(...IMG), FB);
+});
+
+test('测速定向压过兜底窗口 —— 测速是「这个节点通不通」的唯一答案，不能被改写', () => {
+  const pac = loadPac(generatePac(cfg(), {
+    probeNodeId: 'b',
+    forceEntries: [{ pre: 'https://probe.test/', tok: FB, until: Date.now() + 60000 }],
+  }));
+  assert.ok(pac.find(...PROBE).startsWith('PROXY b.px'), '测速条目排在前面，实际：' + pac.find(...PROBE));
+});
+
+test('兜底窗口与测速定向可以同时存在，各管各的源', () => {
+  const pac = loadPac(generatePac(cfg(), {
+    probeNodeId: 'b',
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: Date.now() + 60000 }],
+  }));
+  assert.ok(pac.find(...PROBE).startsWith('PROXY b.px'));
+  assert.equal(pac.find(...IMG), FB);
+});
+
+test('强制条目不带 DIRECT 兜底 —— 那会让「切到兜底代理」变成静默直连', () => {
+  const c = cfg();
+  c.settings.fallback = 'direct';
+  const pac = loadPac(generatePac(c, {
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: Date.now() + 60000 }],
+  }));
+  assert.doesNotMatch(pac.find(...IMG), /DIRECT/);
+});
+
+test('残缺的 force 条目被丢掉，不会在 PAC 里留下 undefined', () => {
+  const pac = generatePac(cfg(), {
+    forceEntries: [{ pre: '', tok: FB, until: 1 }, { pre: 'https://a/', tok: '', until: 1 }, null],
+  });
+  assert.doesNotMatch(pac.slice(pac.indexOf('"force"')), /undefined/);
+  assert.equal(loadPac(pac).find(...MANGA).startsWith('PROXY'), true);
+});
+
+test('兜底代理是中文域名时，PAC 仍然是纯 ASCII', () => {
+  // 一个非 ASCII 字节就会让整份 PAC 被浏览器拒收（决策 D13）
   const punycode = new URL('https://图床.com/').hostname;
-
+  const pac = generatePac(cfg({ rules: [WIDE] }), {
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: `PROXY ${punycode}:8080`, until: Date.now() + 60000 }],
+  });
   assert.ok(isAscii(pac), '生成的 PAC 必须是纯 ASCII');
   assert.match(punycode, /^xn--/, '前提：这个域名确实需要转码');
-  assert.equal(loadPac(pac).find(...browserUrl(`https://${punycode}/?url=x`)), 'DIRECT');
+});
+
+test('没有 forceEntries 时行为与从前完全一致', () => {
+  const pac = loadPac(generatePac(cfg({ rules: [WIDE] }), {}));
+  assert.match(pac.find(...IMG), /^PROXY a\.px|^PROXY b\.px/);
 });

@@ -96,7 +96,7 @@
             <p>重发是一次<strong>全新的请求</strong>，会被如实计进上面「请求统计」的总量里。
               所以开启重试之后总量变大、成功率变低是正常的 —— 用「重试」这一格来对账。</p>
             <p>「重试救回」是重发之后真的加载成功了，不是估算。「兜底接管」是轮询节点全试过之后
-              改用兜底图片代理的次数。</p>
+              切到兜底代理的次数；「冷却期跳过」是本该切、但该图源刚用过兜底而没切的次数。</p>
             <p>「结果未知」是重发出去了，但那张图已经被页面换掉或者页面导航走了 ——
               浏览器不会再派发任何事件，这次重发的结局永远不会有人回报。它既不算救回也不算失败。</p>
             <p>「页面没捕获」是网络层确实失败了，但页面侧收不到通知：只有 DOM 里的
@@ -338,7 +338,7 @@
 
       <!--
         重试与兜底。
-        这张卡里的三件事是有先后的：先换节点重发，再交给兜底图片代理，最后才是「直连还是裂图」。
+        这张卡里的三件事是有先后的：先换节点重发，再切到兜底代理重发，最后才是「直连还是裂图」。
         「全部失败后」选直连会让前两步整块失效（图片静默走直连、不派发 error），
         所以那个组合必须有一条条件 banner 明确说出来 —— 交给 renderRetryWarning()。
       -->
@@ -351,11 +351,17 @@
               下一个节点，刚失败的那个已被浏览器自己排除。一个请求始终只挂一个代理，
               所以轮询不会因为重试而变得不均匀。</p>
             <p>只有 <code>&lt;img&gt;</code> 救得回来。CSS 背景图、canvas、以及页面自己用脚本取图再塞进
-              <code>&lt;img&gt;</code> 的阅读器不派发可捕获的错误事件，这类图片救不到。</p>
+              <code>&lt;img&gt;</code> 的阅读器不派发可捕获的错误事件，这类图片救不到。要覆盖
+              <code>fetch</code> / XHR / 预加载图，见下面的「深度重试站点」。</p>
             <p>图源返回 404 / 5xx 时<strong>不</strong>重试：换个代理拿到的还是同一个结果。</p>
-            <p>兜底图片代理是按地址取图的服务（如 wsrv.nl、imgproxy、自建 Worker），
-              用 <code>{url}</code> 放原图地址（已编码），要求不编码的服务用 <code>{raw}</code>。
-              <strong>它会拿到你的图片地址</strong>，用公共服务等于交给第三方。</p>
+            <p><strong>兜底代理是一个普通的 HTTP/HTTPS 代理</strong>，填「地址:端口」就行。它独立于
+              节点列表：不参与轮询、不测速、不会被自动禁用。轮询节点全试过仍然失败时，
+              扩展把这个图源临时指向它，然后让页面再发一次。</p>
+            <p><strong>它是按「图源」生效的，不是按单张图。</strong>浏览器只把「协议+域名」交给分流
+              脚本（路径和查询串被剥掉了），所以没法只让某一张图换代理。兜底触发后的
+              <strong>12 秒内</strong>，这个图源的所有请求都会走兜底代理；随后进入 30 秒冷却期，
+              冷却期内用尽的图直接裂掉。冷却是刻意的 —— 否则轮询池持续失败时，整个图源会
+              长期只走兜底代理那一个 IP，而这正是本扩展存在意义的反面。</p>
           </div>
         </details>
         <div class="field-grid">
@@ -381,22 +387,24 @@
             </select>
           </div>
           <div class="field field--inline">
-            <label class="field__label" for="fallbackImageTemplate">兜底图片代理</label>
-            <input type="text" id="fallbackImageTemplate" spellcheck="false"
-              placeholder="https://wsrv.nl/?url={url}">
+            <label class="field__label" for="fallbackProxyRaw">兜底代理</label>
+            <input type="text" id="fallbackProxyRaw" spellcheck="false"
+              placeholder="http://10.0.0.3:37581">
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="fallbackProxyUser">兜底代理账号</label>
+            <input type="text" id="fallbackProxyUser" spellcheck="false" autocomplete="off"
+              placeholder="不需要认证就留空">
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="fallbackProxyPass">兜底代理密码</label>
+            <input type="password" id="fallbackProxyPass" autocomplete="off">
           </div>
         </div>
         <div class="banner banner--warn" id="retryWarning" hidden></div>
         <div class="stack">
-          <label class="check"><input type="checkbox" id="fallbackImageEnabled"> 启用兜底图片代理</label>
+          <label class="check"><input type="checkbox" id="fallbackProxyEnabled"> 启用兜底代理</label>
         </div>
-        <div class="btn-row">
-          <label class="sr-only" for="fallbackImageProbe">用来试算的图片地址</label>
-          <input type="text" id="fallbackImageProbe" spellcheck="false"
-            placeholder="填一个图片 URL，看它会被改写成什么">
-          <button type="button" class="btn" id="btnTestFallbackImage">试一下</button>
-        </div>
-        <div class="banner banner--info" id="fallbackImageResult" hidden></div>
       </section>
 
       <section class="card">

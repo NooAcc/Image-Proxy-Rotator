@@ -10,8 +10,8 @@
  * 所以不存在「某个不支持的协议从别的路径漏进轮询」的可能。
  */
 
-import { SUPPORTED_PROTOCOLS, PAC_KEYWORDS, PROTOCOL_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from './constants.js';
-import { toAsciiHost } from './ascii.js';
+import { SUPPORTED_PROTOCOLS, PROTOCOL_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from './constants.js';
+import { proxyToken } from './proxy-token.js';
 import { stableId } from './hash.js';
 import { normalizeNode } from './schema.js';
 
@@ -74,19 +74,14 @@ export function createNode(parsed, existingNodes = []) {
 
 /**
  * 节点在 PAC 里的表达式。
+ *
+ * 格式化本身在 `proxy-token.js` —— 兜底代理不是节点，走不了这个函数，但它在 PAC 里的
+ * 写法必须与节点逐字一致，所以两边共用同一个原语。
+ *
  * @returns {string|null} 协议不受支持时返回 null —— 这是可用性的唯一判定点
  */
 export function pacToken(node) {
-  if (!node) return null;
-
-  const keyword = PAC_KEYWORDS[node.protocol];
-  if (!keyword) return null;
-
-  // 中文域名必须转成 Punycode：PAC 产物只能是纯 ASCII，否则整份脚本注入失败
-  const ascii = toAsciiHost(node.host);
-  // IPv6 字面量在 PAC 里必须带方括号，否则端口无法区分
-  const host = ascii.includes(':') && !ascii.startsWith('[') ? `[${ascii}]` : ascii;
-  return `${keyword} ${host}:${node.port}`;
+  return node ? proxyToken(node) : null;
 }
 
 /** 当前是否应该参与轮询 */

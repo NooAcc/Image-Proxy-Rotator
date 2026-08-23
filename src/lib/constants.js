@@ -174,10 +174,34 @@ export function defaultRetrySettings() {
   };
 }
 
-/** @returns 全新的默认兜底图片代理设置 */
-export function defaultFallbackImage() {
-  return { enabled: false, template: '' };
+/** @returns 全新的默认兜底代理设置 */
+export function defaultFallbackProxy() {
+  return { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' };
 }
+
+/**
+ * 兜底窗口开着多久（毫秒）。
+ *
+ * **为什么是一段时间而不是一次请求。** 浏览器交给 PAC 的 https URL 只剩
+ * `https://主机/`（见 lib/pac-url.js），同一个源的「首次」与「用尽后的重试」在 PAC 眼里
+ * 完全一样。所以「只让这一张图走兜底代理」表达不出来，能表达的最接近的东西是
+ * 「接下来这段时间该源的请求都走兜底代理」。
+ *
+ * 12 秒的依据：重发前要等 `retry.delayMs`（≤5s），而实测被限速的节点上一张图能拉十几秒。
+ * 太短会让窗口在重发还没落地时就失效，等于兜底没生效；太长则把更多同源并发请求卷进来。
+ */
+export const FALLBACK_WINDOW_MS = 12000;
+
+/**
+ * 窗口关闭后该源的冷却时长（毫秒）。
+ *
+ * 没有冷却，轮询池长时间大面积失败时窗口会几乎一直开着 —— 整个图源长期只走一个代理，
+ * 而这正是本扩展存在意义的反面（把流量摊到多个 IP 上躲速率限制），图源也可能转而对
+ * 兜底代理的出口 IP 限速。冷却把「持续失败」钉成 `开窗 12s → 冷却 30s` 的循环，
+ * 上界可预测，也能在设置页里说清。
+ */
+export const FALLBACK_COOLDOWN_MS = 30000;
+
 
 /**
  * @returns 全新的默认深度重试设置
@@ -198,7 +222,7 @@ export function defaultSettings() {
      *
      * 1.4.3 及更早默认 `direct`，理由是「宁可图能显示，也不要一上来就整屏裂图」。
      * 实际用下来这个默认值是错的，而且错得很安静：选 `direct` 时浏览器会在连不上代理时
-     * 静默改走直连 —— 图片照常显示、不派发 error，于是**重试、深度重试、兜底图片代理
+     * 静默改走直连 —— 图片照常显示、不派发 error，于是**重试、深度重试、兜底代理
      * 三样一次都不会触发**，而真实 IP 已经交给图源了。用户看到的是「一切正常」，
      * 实际上这个扩展存在的唯一理由已经失效了（详见 docs/LIMITATIONS.md 第 17 节）。
      *
@@ -212,7 +236,7 @@ export function defaultSettings() {
     fallback: 'block',
     rotateEvery: 1,
     retry: defaultRetrySettings(),
-    fallbackImage: defaultFallbackImage(),
+    fallbackProxy: defaultFallbackProxy(),
     deepRetry: defaultDeepRetry(),
     probe: defaultProbeSettings(),
     logLimit: 200,

@@ -21,7 +21,7 @@ import { pacUrl, isSanitizedScheme } from '../../lib/pac-url.js';
 
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { selectablePool } from '../../lib/scheduler.js';
-import { validateTemplate } from '../../lib/image-proxy.js';
+import { parseFallbackProxy } from '../../lib/fallback-proxy.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
 
 const $ = (id) => document.getElementById(id);
@@ -285,7 +285,7 @@ function renderRetryKpis() {
   const box = $('retryKpis');
   clear(box);
   const retry = metrics?.retry;
-  const fb = metrics?.fallbackImage;
+  const fb = metrics?.fallbackProxy;
   if (!retry || !fb) return;
 
   box.append(
@@ -347,6 +347,13 @@ function renderRetryKpis() {
       value: fb.successRate,
       unit: '%',
       tone: fb.successRate === null ? '' : (fb.successRate >= 90 ? 'ok' : 'warn'),
+    }),
+    kpi({
+      label: '冷却期跳过',
+      value: fb.cooldown,
+      unit: '次',
+      tone: fb.cooldown > 0 ? 'warn' : '',
+      hint: fb.cooldown > 0 ? '这些图本该兜底，但图源刚用过、在冷却期' : '',
     }),
   );
 
@@ -626,8 +633,10 @@ function renderSettings() {
   $('rotateEvery').value = s.rotateEvery;
   $('retryAttempts').value = s.retry.maxAttempts;
   $('retryDelay').value = s.retry.delayMs;
-  $('fallbackImageTemplate').value = s.fallbackImage.template;
-  $('fallbackImageEnabled').checked = s.fallbackImage.enabled;
+  $('fallbackProxyRaw').value = s.fallbackProxy.raw;
+  $('fallbackProxyUser').value = s.fallbackProxy.username;
+  $('fallbackProxyPass').value = s.fallbackProxy.password;
+  $('fallbackProxyEnabled').checked = s.fallbackProxy.enabled;
   $('deepRetrySites').value = (s.deepRetry?.sites ?? []).join('\n');
   $('deepRetryEnabled').checked = s.deepRetry?.enabled === true;
   $('probeUrl').value = s.probe.url;
@@ -687,14 +696,15 @@ function renderDeepRetryWarning() {
  * 兜底代理**一次都不会触发**，而真实 IP 已经交给图源了。这个后果必须写在做选择的
  * 地方，不能只写进文档。
  *
- * 第二种是模板填了但不合法：规范化时会强制把开关关掉（见 lib/schema.js），
- * 界面上得说清楚它为什么自己关了，否则就是又一个静默失败。
+ * 第二种是兜底代理地址填了但不可用：规范化时会强制把开关关掉（见 lib/schema.js），
+ * 界面上得说清楚它为什么自己关了，否则就是又一个静默失败 —— 1.4.x 的兜底图片代理
+ * 正是栽在这里：把一个 HTTP 正向代理填进 `?url=` 模板框，三项校验全过，真用到时每次 400。
  */
 function renderRetryWarning() {
   const s = config.settings;
-  const wantsRetry = s.retry.maxAttempts > 1 || Boolean(s.fallbackImage.template);
-  const template = s.fallbackImage.template;
-  const check = template ? validateTemplate(template) : { ok: true };
+  const raw = s.fallbackProxy.raw;
+  const wantsRetry = s.retry.maxAttempts > 1 || Boolean(raw);
+  const check = raw ? parseFallbackProxy(raw) : { ok: true };
 
   if (s.fallback === 'direct' && wantsRetry) {
     setBanner($('retryWarning'),
@@ -706,7 +716,7 @@ function renderRetryWarning() {
   }
   if (!check.ok) {
     setBanner($('retryWarning'),
-      `兜底图片代理地址不可用，已自动停用：${check.reason}。点「试一下」可当场验证。`,
+      `兜底代理地址不可用，已自动停用：${check.reason}`,
       'warn');
     return;
   }
@@ -858,8 +868,12 @@ const saveSettings = debounce(async () => {
     next.settings.rotateEvery = Number($('rotateEvery').value);
     next.settings.retry.maxAttempts = Number($('retryAttempts').value);
     next.settings.retry.delayMs = Number($('retryDelay').value);
-    next.settings.fallbackImage.template = $('fallbackImageTemplate').value.trim();
-    next.settings.fallbackImage.enabled = $('fallbackImageEnabled').checked;
+    next.settings.fallbackProxy = {
+      enabled: $('fallbackProxyEnabled').checked,
+      raw: $('fallbackProxyRaw').value.trim(),
+      username: $('fallbackProxyUser').value,
+      password: $('fallbackProxyPass').value,
+    };
     next.settings.deepRetry = {
       enabled: $('deepRetryEnabled').checked,
       sites: $('deepRetrySites').value.split('\n').map((s) => s.trim()).filter(Boolean),
@@ -1063,7 +1077,8 @@ $('btnTestRule').addEventListener('click', () => {
 
 
 for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retryDelay',
-  'fallbackImageTemplate', 'fallbackImageEnabled', 'deepRetrySites', 'deepRetryEnabled',
+  'fallbackProxyRaw', 'fallbackProxyUser', 'fallbackProxyPass', 'fallbackProxyEnabled',
+  'deepRetrySites', 'deepRetryEnabled',
   'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
   $(id).addEventListener('change', saveSettings);
@@ -1075,22 +1090,8 @@ for (const id of ['deepRetrySites', 'deepRetryEnabled']) {
   $(id).addEventListener('input', renderDeepRetryWarning);
 }
 
-$('btnTestFallbackImage').addEventListener('click', async () => {
-  const template = $('fallbackImageTemplate').value.trim();
-  // 用户没填试算地址时给一个样例，别让「试一下」因为空输入就报错
-  const probe = $('fallbackImageProbe').value.trim() || 'https://cdn.example.com/ch1/001.jpg';
-
-  // 校验交给后台，与真正改写图片地址时用的是同一个函数 —— 两边各写一份判断，
-  // 迟早会出现「试一下说没问题、实际不生效」
-  await guard(async () => {
-    const res = await send('previewFallbackImage', { template, url: probe });
-    setBanner($('fallbackImageResult'),
-      `改写结果：${res.url}\n`
-      + `兜底服务的源是 ${res.origin}。这些请求不经轮询池，直接发往它 —— `
-      + '请确认你信任这个服务：它会看到你访问的每一张图的地址。',
-      'ok');
-  }, 'fallbackImageResult');
-});
+// 兜底代理地址同理：不可用的原因要边打字边说，别等保存之后才发现开关自己关了
+$('fallbackProxyRaw').addEventListener('input', renderRetryWarning);
 
 $('btnExportFile').addEventListener('click', async () => {
   await guard(async () => {

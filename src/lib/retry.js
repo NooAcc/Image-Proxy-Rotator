@@ -14,9 +14,12 @@
  * 重新发一次请求则会触发一次新的 `FindProxyForURL`：轮询下标已经前进，而 Chromium
  * 自带的坏代理列表也已经把刚刚连不上的那个排除掉了（见 docs/LIMITATIONS.md 第 5 节）。
  * 所以「跳过已经试过的代理」这件事不需要在扩展里维护任何状态。
+ *
+ * **兜底在这里只是一个动作名，不带地址**（1.5.0 起）。1.4.x 的兜底是 URL 改写，所以
+ * `fallback` 会带上改写后的地址；现在兜底是传输层的 —— 后台把该源临时指向兜底代理，
+ * 页面侧要做的和普通重发一模一样（原地重发）。判定层因此不需要知道兜底代理是谁，
+ * 只需要知道「兜底这条路现在可用吗」。
  */
-
-import { rewriteImageUrl } from './image-proxy.js';
 
 /**
  * 代理层故障：连不上代理、CONNECT 被拒、代理证书有问题、认证没谈成。
@@ -111,41 +114,35 @@ function attemptOf(value) {
  * 判定一张失败的图片接下来怎么办。
  *
  * @param {object} input
- * @param {string} input.url 原图地址
  * @param {number} input.attempt 这是第几次尝试（含首次）
  * @param {string} input.kind classifyFailure() 的结果
  * @param {boolean} input.matched 这个 URL 命中了启用的规则吗（即：是本扩展路由出去的吗）
  * @param {number} input.maxAttempts 每张图最多尝试几个节点（含首次）
- * @param {boolean} input.fallbackEnabled 兜底图片代理是否启用
- * @param {string} input.fallbackTemplate 兜底模板
- * @returns {{action: 'retry'|'fallback'|'give-up', url?: string, reason?: string}}
+ * @param {boolean} input.fallbackEnabled 兜底代理这条路现在可用吗
+ * @returns {{action: 'retry'|'fallback'|'give-up', reason?: string}}
  *   reason 只在 give-up 时给，取值：not-routed | not-proxy-failure | unknown-cause | exhausted
  */
 export function decideRetry({
-  url,
   attempt,
   kind,
   matched,
   maxAttempts,
   fallbackEnabled,
-  fallbackTemplate,
 } = {}) {
   // 不是本扩展路由出去的图，裂了也与我们无关。重刷它纯属给别人的站点添乱
   if (!matched) return { action: 'give-up', reason: 'not-routed' };
 
-  // 原因不明 ≠ 代理挂了。当成代理故障的话，每张 404 的图都会去兜底服务上再取一次，
-  // 白白把图源地址交给第三方
+  // 原因不明 ≠ 代理挂了。当成代理故障的话，每张 404 的图都会去兜底代理上再取一次，
+  // 而那多半只是把同一个 404 换个出口再拿一遍
   if (kind === 'unknown') return { action: 'give-up', reason: 'unknown-cause' };
   if (!isRetriableKind(kind)) return { action: 'give-up', reason: 'not-proxy-failure' };
 
   const cap = Math.max(1, Math.trunc(Number(maxAttempts)) || 1);
   if (attemptOf(attempt) < cap) return { action: 'retry' };
 
-  // 轮询节点都试过了，交给兜底图片代理。rewriteImageUrl 会挡住「兜底自己失败后
-  // 又被套一层」的情况（返回 null），所以这里不需要额外判断
-  if (fallbackEnabled) {
-    const rewritten = rewriteImageUrl(fallbackTemplate, url);
-    if (rewritten) return { action: 'fallback', url: rewritten };
-  }
+  // 轮询节点都试过了，交给兜底代理。**再失败就不会有下一次**：那时 attempt 已经超过
+  // 上限，还是走到这里并返回 fallback —— 所以防套娃靠调用方按 reason 收口，
+  // 而不是靠地址形状（1.4.x 的 isProxiedUrl 是为 URL 改写准备的，现在没有了）
+  if (fallbackEnabled && attemptOf(attempt) === cap) return { action: 'fallback' };
   return { action: 'give-up', reason: 'exhausted' };
 }
