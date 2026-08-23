@@ -174,6 +174,16 @@ export function defaultFallbackImage() {
   return { enabled: false, template: '' };
 }
 
+/**
+ * @returns 全新的默认深度重试设置
+ *
+ * 默认关闭且清单为空：它会向页面的**主世界**注入代码去包住 `fetch` / `XHR` / `Image`，
+ * 这是本扩展权限面最大的一件事，必须由用户逐个站点显式打开（决策 D31）。
+ */
+export function defaultDeepRetry() {
+  return { enabled: false, sites: [] };
+}
+
 /** @returns 全新的默认设置对象 */
 export function defaultSettings() {
   return {
@@ -182,6 +192,7 @@ export function defaultSettings() {
     rotateEvery: 1,
     retry: defaultRetrySettings(),
     fallbackImage: defaultFallbackImage(),
+    deepRetry: defaultDeepRetry(),
     probe: defaultProbeSettings(),
     logLimit: 200,
     bypassList: [...DEFAULT_BYPASS_LIST],

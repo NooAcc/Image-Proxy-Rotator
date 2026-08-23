@@ -264,11 +264,17 @@ function PP_matchPool(url, host, stripped) {
 }
 
 // Round robin: take the current index, then advance once every rotateEvery hits.
+// The counter is shared by every pool, so it must NOT be wrapped by the pool that
+// happened to be used last. Wrapping by tokens.length lets a one-node pool (a rule
+// bound to a single node) reset the shared index to 0 on every hit, which pins every
+// other rule to the first one or two nodes -- the exact opposite of what this
+// extension exists for. Wrap at a large constant instead and take the modulo only
+// when picking.
 function PP_pick(tokens) {
   if (!tokens || tokens.length === 0) return null;
   var picked = tokens[PP_I % tokens.length];
   PP_N++;
-  if (PP_N % PP.rotateEvery === 0) PP_I = (PP_I + 1) % tokens.length;
+  if (PP_N % PP.rotateEvery === 0) PP_I = (PP_I + 1) % 1000000;
   return picked;
 }
 

@@ -92,6 +92,12 @@ export function installChromeStub() {
   let settingsThrows = null;
   let fetchImpl = async () => ({ ok: true, status: 204 });
 
+  /** 已注册的动态内容脚本：id -> 注册项 */
+  const registeredScripts = new Map();
+  /** chrome.scripting 的调用序列 */
+  const scriptingCalls = [];
+  let scriptingThrows = null;
+
   globalThis.chrome = {
     storage: { local, session, onChanged: makeEvent(listeners.onChanged) },
 
@@ -136,6 +142,42 @@ export function installChromeStub() {
       onErrorOccurred: makeEvent(listeners.onErrorOccurred),
       onAuthRequired: makeEvent(listeners.onAuthRequired),
     },
+
+    /**
+     * 动态内容脚本注册。深度重试的补丁靠它按站点装卸（决策 D31）。
+     *
+     * 记下每一次调用而不只是最终状态：`register` 与 `update` 用错的那种 bug
+     * （对已注册的 id 调 register 会抛错）只有看调用序列才能断言出来。
+     */
+    scripting: {
+      async getRegisteredContentScripts(filter) {
+        const ids = filter?.ids;
+        const all = [...registeredScripts.values()];
+        return ids ? all.filter((s) => ids.includes(s.id)) : all;
+      },
+      async registerContentScripts(scripts) {
+        scriptingCalls.push({ type: 'register', ids: scripts.map((s) => s.id) });
+        if (scriptingThrows) throw new Error(scriptingThrows);
+        for (const script of scripts) {
+          if (registeredScripts.has(script.id)) throw new Error(`Duplicate script ID '${script.id}'`);
+          registeredScripts.set(script.id, { ...script });
+        }
+      },
+      async updateContentScripts(scripts) {
+        scriptingCalls.push({ type: 'update', ids: scripts.map((s) => s.id) });
+        if (scriptingThrows) throw new Error(scriptingThrows);
+        for (const script of scripts) {
+          if (!registeredScripts.has(script.id)) throw new Error(`Nonexistent script ID '${script.id}'`);
+          registeredScripts.set(script.id, { ...registeredScripts.get(script.id), ...script });
+        }
+      },
+      async unregisterContentScripts(filter) {
+        const ids = filter?.ids ?? [...registeredScripts.keys()];
+        scriptingCalls.push({ type: 'unregister', ids });
+        if (scriptingThrows) throw new Error(scriptingThrows);
+        for (const id of ids) registeredScripts.delete(id);
+      },
+    },
   };
 
   globalThis.fetch = (url, options) => {
@@ -150,6 +192,8 @@ export function installChromeStub() {
     alarms,
     listeners,
     fetchCalls,
+    registeredScripts,
+    scriptingCalls,
 
     /** 清掉调用记录与存储，但保留已注册的监听器（它们只在 install 时注册一次） */
     reset() {
@@ -158,6 +202,9 @@ export function installChromeStub() {
       proxyCalls.length = 0;
       fetchCalls.length = 0;
       alarms.clear();
+      registeredScripts.clear();
+      scriptingCalls.length = 0;
+      scriptingThrows = null;
       levelOfControl = 'controlled_by_this_extension';
       settingsValue = { mode: 'direct' };
       settingsThrows = null;
@@ -172,6 +219,13 @@ export function installChromeStub() {
     },
     setFetch(fn) {
       fetchImpl = fn;
+    },
+    setScriptingError(message) {
+      scriptingThrows = message;
+    },
+    /** 让 chrome.scripting 整个消失，模拟版本过低的浏览器 */
+    removeScripting() {
+      delete globalThis.chrome.scripting;
     },
 
     /** 最近一次成功注入的 PAC 脚本源码；没注入过则为 null */

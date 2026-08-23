@@ -303,6 +303,37 @@ test('rotateEvery=2 时每两个请求才换节点', () => {
   assert.ok(seq[3].includes('b.px'));
 });
 
+test('绑定单节点的规则不会把别的规则的轮询压死在少数几个节点上', () => {
+  // 轮询下标 PP_I 由所有规则共用。推进时若按「当前这条规则的池长度」取模，
+  // 一个单节点池（规则绑定了一个节点）每次命中都会把共享下标重置成 0 ——
+  // 于是图片规则永远只走第一个节点，其余全闲着。而这个扩展存在的唯一理由
+  // 就是把请求摊到多个 IP 上。
+  //
+  // 注意共享计数器本身的性质：夹在中间的 API 请求同样推进下标，所以图片是
+  // 隔一个取一个。池大小与步长互质时仍能走遍全部节点，这是可接受的；
+  // 「永远只有一个」则不是。
+  const nodes = ['a', 'b', 'c', 'd', 'e'].map((id) => node(id));
+  const c = cfg({
+    nodes,
+    rules: [
+      rule({ id: 'r_img', type: 'host', pattern: 'cdn.manga.com', nodeIds: [] }),
+      rule({ id: 'r_api', type: 'host', pattern: 'api.manga.com', nodeIds: ['a'] }),
+    ],
+  });
+  const pac = loadPac(generatePac(c, { startIndex: 0 }));
+  const API = browserUrl('https://api.manga.com/x');
+
+  const seen = new Set();
+  for (let i = 0; i < 5; i++) {
+    seen.add(pac.find(...browserUrl(`https://cdn.manga.com/${i}.jpg`)));
+    // 每张图之间夹一次 API 请求，它命中的是那条只绑了一个节点的规则
+    assert.match(pac.find(...API), /a\.px/, '绑定单节点的规则当然始终走那一个节点');
+  }
+
+  assert.equal(seen.size, 5,
+    `图片应当走遍 5 个节点，实际只用到 ${seen.size} 个：${[...seen].join(' | ')}`);
+});
+
 test('pacSummary 统计生效的节点与规则数', () => {
   const s = pacSummary(cfg());
   assert.equal(s.nodeCount, 2);

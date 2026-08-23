@@ -451,3 +451,73 @@ test('重发悬空的次数在面板上能看见', async () => {
   assert.equal(m.retry.pending, 0);
   assert.equal(m.retry.abandoned, 1, '结论是「不会有结论了」，也是一种结论');
 });
+
+// ---------------------------------------------------------------- 深度重试（决策 D31）
+
+/** 走一遍「后台观测到失败 → 主世界补丁来问」的往返 */
+async function askVia(via, observed, { url = IMG_URL, attempt = 1 } = {}) {
+  await stub.emit('onBeforeRequest', { requestId: 'r-deep', url });
+  if (observed.error) await stub.emit('onErrorOccurred', { requestId: 'r-deep', url, error: observed.error });
+  else await stub.emit('onCompleted', { requestId: 'r-deep', url, statusCode: observed.statusCode });
+  return handleMessage({ type: 'imageRetryAsk', url, attempt, via });
+}
+
+test('补丁问过就记 deep —— 它回答的是「补丁装上没有」，不是「重发了几次」', async () => {
+  await seed();
+  await askVia('fetch', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
+
+  const m = await view();
+  assert.equal(m.retry.deep, 1);
+  assert.equal(m.retry.attempted, 1, 'deep 与 attempted 是正交的两格，同一次判定都要 +1');
+});
+
+test('被判定为不重试时 deep 照样 +1 —— 问过就算装上了', async () => {
+  await seed();
+  await askVia('xhr', { statusCode: 404 });
+
+  const m = await view();
+  assert.equal(m.retry.deep, 1);
+  assert.equal(m.retry.attempted, 0);
+  assert.equal(m.retry.skipped, 1);
+});
+
+test('`<img>` 那条路不记 deep', async () => {
+  await seed();
+  await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' });
+  assert.equal((await view()).retry.deep, 0);
+});
+
+test('来路不明的 via 不记 deep，也不影响判定', async () => {
+  await seed();
+  const plan = await askVia('nonsense', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
+  assert.equal(plan.action, 'retry');
+  assert.equal((await view()).retry.deep, 0);
+});
+
+test('fetch / XHR 用尽次数后不给兜底 —— 兜底是图片代理，套不住 JSON 接口', async () => {
+  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackImage: { enabled: true, template: TEMPLATE } } });
+  const plan = await askVia('fetch', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
+
+  assert.equal(plan.action, 'give-up');
+  assert.equal(plan.reason, 'exhausted');
+
+  const m = await view();
+  assert.equal(m.retry.exhausted, 1);
+  // 只在补丁那侧挡的话，这里会先记上一笔，面板于是显示「兜底用了 1 次」而它一次都没被用过
+  assert.equal(m.fallbackImage.used, 0, '没用过就不能记，否则统计自己在说谎');
+});
+
+test('new Image() 用尽次数后照常给兜底 —— 它取的确实是一张图', async () => {
+  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackImage: { enabled: true, template: TEMPLATE } } });
+  const plan = await askVia('image', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
+
+  assert.equal(plan.action, 'fallback');
+  assert.equal(plan.url, PROXIED);
+  assert.equal((await view()).fallbackImage.used, 1);
+});
+
+test('补丁来问同样撤销「页面没捕获」的判定', async () => {
+  await seed();
+  await askVia('image', { error: 'net::ERR_PROXY_CONNECTION_FAILED' });
+  assert.equal((await view()).retry.unseen, 0, '补丁问过了，就不该再被算成「页面没捕获」');
+});

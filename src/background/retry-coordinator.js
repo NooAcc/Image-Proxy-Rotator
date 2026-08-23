@@ -66,13 +66,20 @@ const GIVE_UP_TEXT = {
 /**
  * 内容脚本报告一张图加载失败，决定接下来怎么办。
  *
- * @param {{url: string, attempt: number}} report
+ * @param {{url: string, attempt: number, via?: 'fetch'|'xhr'|'image'}} report
+ *   `via` 由主世界补丁给出（决策 D31）。缺省表示来自 retry.js 的 `<img>` 那条路。
  * @returns {Promise<{action: 'retry'|'fallback'|'give-up', url?: string, delayMs?: number, reason?: string}>}
  */
-export async function planRetry({ url, attempt } = {}) {
+export async function planRetry({ url, attempt, via } = {}) {
   // 页面来问了，就撤销「这次失败页面没捕获到」的判定 —— 无论接下来决定重不重试。
   // 放在最前面：下面每一条提前返回都同样意味着「页面确实看见了」
   if (typeof url === 'string' && url) noteRetryAsked(url);
+
+  // 补丁问过一次就记一笔，不管后台答不答应重发。这一格要回答的是「补丁到底装上没有、
+  // 在不在干活」—— 它恒为 0 而 retry.unseen 照旧居高不下，就是「补丁没装上」的指认
+  if (via === 'fetch' || via === 'xhr' || via === 'image') {
+    await noteRetryMetric({ kind: 'deep', at: Date.now() });
+  }
 
   const config = await getConfig();
   const give = (reason) => {
@@ -112,13 +119,19 @@ export async function planRetry({ url, attempt } = {}) {
   }
   if (!kind) kind = 'unknown';
 
+  // 兜底是**图片**代理：把一个 JSON 接口套进 `?url=` 里毫无意义，而 fetch / XHR 这两条路
+  // 分不出取的是图还是数据。所以只有 `<img>` 与 `new Image()` 能走到兜底 —— 其余在这里就
+  // 把兜底关掉，让判定落到 `exhausted`。若只在补丁那侧挡，`planRetry` 会先把
+  // `fallbackImage.used` 记上一笔，面板于是显示「兜底用了 N 次」而它一次都没被用过
+  const canFallback = via !== 'fetch' && via !== 'xhr';
+
   const plan = decideRetry({
     url,
     attempt,
     kind,
     matched: true,
     maxAttempts: retry.maxAttempts,
-    fallbackEnabled: fallbackImage.enabled,
+    fallbackEnabled: canFallback && fallbackImage.enabled,
     fallbackTemplate: fallbackImage.template,
   });
 
@@ -131,9 +144,11 @@ export async function planRetry({ url, attempt } = {}) {
       waitedForCause: waited,
       action: plan.action,
       reason: plan.reason ?? null,
+      via: via ?? 'img',
       maxAttempts: retry.maxAttempts,
       delayMs: retry.delayMs,
       fallbackEnabled: fallbackImage.enabled,
+      fallbackOffered: canFallback && fallbackImage.enabled,
       fallbackUrl: plan.url ?? null,
     });
   }
@@ -199,10 +214,10 @@ export async function planRetry({ url, attempt } = {}) {
  * @param {{url: string, kind: 'retry'|'fallback'|'budget', ok: ?boolean}} report
  *   ok 为 true = 收到 load，false = 又失败了，null = 永远不会有结论
  */
-export async function noteRetryOutcome({ url, kind, ok } = {}) {
+export async function noteRetryOutcome({ url, kind, ok, via } = {}) {
   const succeeded = ok === true;
   const abandoned = ok === null || ok === undefined;
-  if (dbg.on) dbg('retry', 'outcome', { url: url ?? null, kind: kind ?? null, ok: abandoned ? null : succeeded });
+  if (dbg.on) dbg('retry', 'outcome', { url: url ?? null, kind: kind ?? null, via: via ?? 'img', ok: abandoned ? null : succeeded });
 
   // 页面侧的重试预算用完了。上限是刻意设的，但绝不能悄悄生效 —— 不说的话，
   // 用户看到的是「重试到一半就不重试了」，而统计里找不到任何解释

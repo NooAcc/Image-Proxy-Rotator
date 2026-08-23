@@ -86,6 +86,37 @@ if (manifest) {
       }
     }
   }
+
+  checkDynamicContentScripts();
+}
+
+/**
+ * 动态注册的内容脚本（深度重试的桥与补丁，决策 D31）。
+ *
+ * 它们在 manifest 里一行都没有，所以上面那一段完全碰不到 —— 而它们同样是 classic
+ * script、同样不能有 import，路径写错同样只会在注册那一刻失败。手写一份清单会跟代码
+ * 脱节，所以从注入器源码里把路径抠出来。
+ */
+function checkDynamicContentScripts() {
+  const injector = join(ROOT, 'src', 'background', 'deep-retry-injector.js');
+  if (!existsSync(injector)) return;
+
+  const source = readFileSync(injector, 'utf8');
+  const paths = [...new Set([...source.matchAll(/'(src\/[^']+\.js)'/g)].map((m) => m[1]))];
+  if (paths.length === 0) {
+    fail('deep-retry-injector.js 里找不到任何要注册的脚本路径，注入范围无从校验');
+  }
+
+  for (const path of paths) {
+    const full = join(ROOT, path);
+    if (!existsSync(full)) {
+      fail(`${path} 会被动态注册，但文件不存在 —— 注册那一刻才会失败，且只在活动日志里`);
+      continue;
+    }
+    if (/^\s*(?:import|export)\s/m.test(readFileSync(full, 'utf8'))) {
+      fail(`${path} 是动态注册的 content script，不能含 import/export`);
+    }
+  }
 }
 
 // ---- 工具：递归列出文件 ----

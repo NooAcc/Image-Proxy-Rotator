@@ -11,9 +11,10 @@ import {
   STRATEGIES, FALLBACKS, DEFAULT_PROBE_URL, DEFAULT_BYPASS_LIST,
   RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS,
   defaultConfig, defaultSettings, defaultProbeSettings,
-  defaultRetrySettings, defaultFallbackImage,
+  defaultRetrySettings, defaultFallbackImage, defaultDeepRetry,
 } from './constants.js';
 import { validateTemplate } from './image-proxy.js';
+import { deepRetryPatterns, DEEP_RETRY_SITE_CAP } from './deep-retry.js';
 import { stableId, isValidId } from './hash.js';
 
 /** 把值夹到 [min, max] 区间内的整数；非法时返回 fallback */
@@ -190,6 +191,28 @@ export function normalizeFallbackImage(raw) {
   };
 }
 
+/**
+ * 规范化深度重试设置。
+ *
+ * 与 `normalizeFallbackImage` 同一条纪律：**一条可用站点都没有时强制 `enabled=false`，
+ * 但保留用户填的文本。** 强制关闭是为了不把「开关显示开着、实际一个页面都不会被注入」
+ * 这种状态持久化；保留文本是为了让设置页能逐行说明每一条为什么没被接受
+ * （原因由 `deepRetryPatterns()` 给出）。
+ */
+export function normalizeDeepRetry(raw) {
+  const base = defaultDeepRetry();
+  if (!isPlainObject(raw)) return base;
+
+  const sites = Array.isArray(raw.sites)
+    ? raw.sites.map((x) => asString(x).trim()).filter(Boolean).slice(0, DEEP_RETRY_SITE_CAP)
+    : [];
+
+  return {
+    enabled: raw.enabled === true && deepRetryPatterns(sites).patterns.length > 0,
+    sites,
+  };
+}
+
 export function normalizeSettings(raw) {
   const base = defaultSettings();
   if (!isPlainObject(raw)) return base;
@@ -204,6 +227,7 @@ export function normalizeSettings(raw) {
     rotateEvery: clampInt(raw.rotateEvery, 1, 1000, base.rotateEvery),
     retry: normalizeRetrySettings(raw.retry),
     fallbackImage: normalizeFallbackImage(raw.fallbackImage),
+    deepRetry: normalizeDeepRetry(raw.deepRetry),
     probe: normalizeProbeSettings(raw.probe),
     logLimit: clampInt(raw.logLimit, 10, 2000, base.logLimit),
     bypassList,

@@ -400,6 +400,35 @@
       </section>
 
       <section class="card">
+        <div class="card__head"><h2>深度重试站点</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>它做什么、代价是什么</summary>
+          <div class="card__help__body">
+            <p>普通重试只救得回页面 DOM 里的 <code>&lt;img&gt;</code>。阅读器常用
+              <code>new Image()</code> 预加载大图、或用 <code>fetch</code> / <code>XHR</code>
+              取图和调接口 —— 那些请求裂了，扩展<strong>收不到任何通知</strong>，调高重试次数也没用。</p>
+            <p>在这里填上的站点会被额外注入一小段代码，包住这三个入口，让它们的网络失败也能
+              换个节点重发一次。<strong>只重发 GET / HEAD</strong> —— 发评论、点收藏这类请求
+              一律原样报错，不会被重复提交。</p>
+            <p><strong>代价必须说清：</strong>这段代码跑在页面自己的 JS 环境里（主世界），
+              理论上可能与站点自己的封装冲突。所以它<strong>只装在你填的站点上</strong>，
+              没填的站点一个字节都不会被注入。填之前请确认你信任这个站点，出问题就把它删掉。</p>
+            <p>填法：直接写域名（<code>nhentai.net</code>，自动覆盖子域名），
+              或写完整匹配范围（<code>https://noymanga.com/read/*</code>）收窄到具体路径。
+              一行一条。</p>
+          </div>
+        </details>
+        <div class="stack">
+          <label class="sr-only" for="deepRetrySites">深度重试站点，一行一条</label>
+          <textarea id="deepRetrySites" rows="4" spellcheck="false"
+            placeholder="nhentai.net&#10;https://noymanga.com/read/*"></textarea>
+          <label class="check"><input type="checkbox" id="deepRetryEnabled"> 启用深度重试</label>
+        </div>
+        <div class="banner banner--warn" id="deepRetryWarning" hidden></div>
+        <div class="banner banner--info" id="deepRetryScope" hidden></div>
+      </section>
+
+      <section class="card">
         <div class="card__head"><h2>测速与健康检查</h2></div>
         <details class="card__help">
           <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>测速地址该填什么</summary>

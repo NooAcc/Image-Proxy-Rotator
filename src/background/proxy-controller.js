@@ -9,6 +9,7 @@ import { generatePac, pacSummary, canRouteProbe } from '../lib/pac-generator.js'
 import { isAscii } from '../lib/ascii.js';
 import { getConfig, getRuntime, getLogger, saveRuntime } from './state.js';
 import { noteApplyMetric } from './metrics-store.js';
+import { syncDeepRetryScripts } from './deep-retry-injector.js';
 import { dbg } from './debug-store.js';
 
 
@@ -45,6 +46,11 @@ export async function applyProxy() {
   const log = await getLogger();
   const runtime = getRuntime();
   const config = await getConfig();
+
+  // 深度重试的注入范围与 PAC 必须一起更新。挂在这里而不是散落在十几个改配置的 handler
+  // 里：那样早晚会漏一处，而漏掉的表现是「站点清单改了、补丁的注册范围没跟上」——
+  // 又一种不报错的静默失效。它自己带短路，重复调用是廉价的
+  runtime.deepRetry = await syncDeepRetryScripts();
 
   const summary = pacSummary(config);
   runtime.summary = summary;

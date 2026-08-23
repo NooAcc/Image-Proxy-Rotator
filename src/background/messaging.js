@@ -338,14 +338,14 @@ const handlers = {
    * 这是页面与后台之间唯一的「决定」型消息。规则匹配与次数上限都在后台（决策 D21），
    * 页面侧不持有任何规则副本。
    */
-  async imageRetryAsk({ url, attempt }) {
-    const plan = await planRetry({ url, attempt });
+  async imageRetryAsk({ url, attempt, via }) {
+    const plan = await planRetry({ url, attempt, via });
     return { ok: true, ...plan };
   },
 
   /** 内容脚本：重发或兜底的结果。`retry.recovered` 唯一的来源 */
-  async imageRetryResult({ url, kind, ok }) {
-    return noteRetryOutcome({ url, kind, ok });
+  async imageRetryResult({ url, kind, ok, via }) {
+    return noteRetryOutcome({ url, kind, ok, via });
   },
 
   /** 兜底模板的即时校验与预览，设置页的「试一下」按钮用 */

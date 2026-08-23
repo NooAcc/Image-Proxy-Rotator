@@ -82,6 +82,20 @@ test('manifest 引用的每个文件都必须在包内，content_scripts 也算'
   }
 });
 
+test('动态注册的内容脚本也必须在包内 —— manifest 里根本没有它们', () => {
+  // 深度重试的两个脚本是 chrome.scripting 在运行时注册的（决策 D31），manifest 里
+  // 一行都没有，所以上面那道断言碰不到它们。漏进包里的后果比静态脚本更隐蔽：
+  // 注册那一刻浏览器才发现文件不存在，而那时用户正在浏览某个漫画站
+  const names = collectFiles(ROOT).map((f) => f.name);
+  const injector = readFileSync(join(ROOT, 'src', 'background', 'deep-retry-injector.js'), 'utf8');
+  const referenced = [...injector.matchAll(/'(src\/[^']+\.js)'/g)].map((m) => m[1]);
+
+  assert.ok(referenced.length >= 2, '注入器里应当引用桥与补丁两个文件');
+  for (const path of referenced) {
+    assert.ok(names.includes(path), `动态注册引用的 ${path} 不在包内`);
+  }
+});
+
 test('zip 能被独立解析，且内容与源文件逐字节一致', () => {
   const entries = collectFiles(ROOT);
   const parsed = readZip(buildZip(entries));

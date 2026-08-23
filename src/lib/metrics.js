@@ -90,7 +90,17 @@ export function emptyMetrics() {
      *
      * `abandoned` 与 `unseen` 补的是两个曾经无处可查的缺口，见 noteRetry 的注释。
      */
-    retry: { attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0 },
+    retry: {
+      attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0,
+      /**
+       * 主世界补丁问过后台多少次（决策 D31 的那条路）。
+       *
+       * 口径刻意与 `attempted` 不同：这一格要回答的是「补丁到底装上没有、在不在干活」，
+       * 而不是「重发了几次」。补丁装不上（站点自己抢先包了 fetch、注册失败、CSP 拦截）
+       * 时它恒为 0，而 `retry.unseen` 会继续涨 —— 两个数字放在一起才能指认那种失败。
+       */
+      deep: 0,
+    },
     /** 兜底图片代理：轮询节点全试过之后接手了多少次，以及它自己的成败 */
     fallbackImage: { used: 0, ok: 0, fail: 0 },
 
@@ -540,6 +550,9 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       skipped: m.retry.skipped,
       abandoned: m.retry.abandoned,
       unseen: m.retry.unseen,
+      // 其中有多少次是主世界补丁问的。它与 unseen 是一对：补丁在干活时 unseen 会明显
+      // 下降，而 deep 恒为 0、unseen 照旧居高不下就说明补丁根本没装上
+      deep: m.retry.deep,
       // 重发了却还没有结论的次数。不为零本身是有用的信号：要么还在路上，要么页面
       // 在重发之后被换掉了而「结果未知」的超时还没到。上一版没有这一格，于是
       // 「重发 7 次、救回 6 次」里那 1 次差额在面板上完全找不到

@@ -16,6 +16,7 @@ import {
 } from '../shared/api.js';
 import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar, kvRow } from '../shared/ui.js';
 import { matchUrl, matchPacUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
+import { deepRetryPatterns } from '../../lib/deep-retry.js';
 import { pacUrl, isSanitizedScheme } from '../../lib/pac-url.js';
 
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
@@ -333,6 +334,13 @@ function renderRetryKpis() {
       tone: retry.unseen > 0 ? 'warn' : '',
       hint: retry.unseen > 0 ? '这些裂图重试机制碰不到' : '',
     }),
+    kpi({
+      label: '深度重试',
+      value: retry.deep,
+      unit: '次',
+      tone: retry.deep > 0 ? 'ok' : '',
+      hint: retry.deep > 0 ? '主世界补丁问的（fetch / XHR / 预加载图）' : '',
+    }),
     kpi({ label: '兜底接管', value: fb.used, unit: '次' }),
     kpi({
       label: '兜底成功率',
@@ -345,11 +353,16 @@ function renderRetryKpis() {
   // 「页面没捕获」不为零是一个结构性结论，不是一次偶发失败：这个站点的图不是
   // DOM 里的 <img>，重试机制对它整体无效。它值得一条 banner —— 否则用户只会
   // 反复调重试次数，而那个旋钮对这些图一点作用都没有
+  //
+  // 补丁装上之后措辞必须跟着变：那时「调高重试次数没有用」不再成立，而
+  // 「deep 恒为 0 但 unseen 照旧居高不下」反倒是「补丁没装上」的指认
   setBanner($('unseenWarning'), retry.unseen > 0
     ? `有 ${retry.unseen} 次失败没能被页面捕获到，重试机制碰不到它们。`
       + '只有 DOM 里的 <img> 会派发可捕获的 error，而很多阅读器用 new Image() 预加载、'
       + '或用 fetch 取 blob —— 那些图裂了，扩展收不到任何通知，调高重试次数也没有用。'
-      + '这是浏览器扩展的能力边界，详见 docs/LIMITATIONS.md。'
+      + (retry.deep > 0
+        ? `（「深度重试」已经接住了 ${retry.deep} 次，剩下的这些是补丁也够不到的：CSS 背景图、canvas。）`
+        : '要覆盖这类请求，请在下面的「深度重试站点」里加上这个站点。')
     : '', 'warn');
 }
 
@@ -615,6 +628,8 @@ function renderSettings() {
   $('retryDelay').value = s.retry.delayMs;
   $('fallbackImageTemplate').value = s.fallbackImage.template;
   $('fallbackImageEnabled').checked = s.fallbackImage.enabled;
+  $('deepRetrySites').value = (s.deepRetry?.sites ?? []).join('\n');
+  $('deepRetryEnabled').checked = s.deepRetry?.enabled === true;
   $('probeUrl').value = s.probe.url;
   $('probeTimeout').value = s.probe.timeoutMs;
   $('probeInterval').value = s.probe.intervalMinutes;
@@ -624,6 +639,44 @@ function renderSettings() {
   $('autoDisable').checked = s.probe.autoDisable;
   $('recoverProbe').checked = s.probe.recoverProbe;
   renderRetryWarning();
+  renderDeepRetryWarning();
+}
+
+/**
+ * 深度重试的两条提示。
+ *
+ * **逐行说明为什么某一条没被接受，是这块 UI 的主要价值。**
+ * `chrome.scripting.registerContentScripts()` 对非法 match pattern 是整批拒绝的，
+ * 一条写错十条一起不注册；而注册失败之后页面照常加载、补丁只是不存在 —— 表现就是
+ * 「勾了但没用」。所以被摘出来的条目必须带着原因显示在填它的地方。
+ *
+ * 第二条是「开关自己关了」：一条可用站点都没有时 schema 会强制 enabled=false
+ * （与兜底模板非法时同一条纪律），界面上得说清它为什么关了。
+ */
+function renderDeepRetryWarning() {
+  const s = config.settings;
+  const raw = $('deepRetrySites').value.split('\n').map((x) => x.trim()).filter(Boolean);
+  const { patterns, skipped } = deepRetryPatterns(raw);
+  const wantsDeep = $('deepRetryEnabled').checked || raw.length > 0;
+
+  const problems = [];
+  if (skipped.length > 0) {
+    problems.push(`有 ${skipped.length} 条填法不能用，它们不会被注入：`
+      + skipped.map((x) => `「${x.raw}」—— ${x.reason}`).join('；'));
+  }
+  if ($('deepRetryEnabled').checked && patterns.length === 0) {
+    problems.push('开关已勾选，但没有一条可用的站点 —— 保存后开关会自动关闭，'
+      + '因为「显示开着、实际一个页面都不会被注入」是本扩展刻意不保存的状态。');
+  }
+  if (wantsDeep && s.fallback === 'direct') {
+    problems.push('「全部失败后」目前是直连原图：那种情况下代理连不上会被浏览器静默改走直连，'
+      + '深度重试同样一次都不会触发。想让它生效，请改选「不直连」。');
+  }
+  setBanner($('deepRetryWarning'), problems.join('　'), 'warn');
+
+  setBanner($('deepRetryScope'), patterns.length > 0 && $('deepRetryEnabled').checked
+    ? `补丁会被注入到：${patterns.join('、')}。只有这些范围内的页面会被注入，其余站点一个字节都没有。`
+    : '', 'info');
 }
 
 /**
@@ -807,6 +860,10 @@ const saveSettings = debounce(async () => {
     next.settings.retry.delayMs = Number($('retryDelay').value);
     next.settings.fallbackImage.template = $('fallbackImageTemplate').value.trim();
     next.settings.fallbackImage.enabled = $('fallbackImageEnabled').checked;
+    next.settings.deepRetry = {
+      enabled: $('deepRetryEnabled').checked,
+      sites: $('deepRetrySites').value.split('\n').map((s) => s.trim()).filter(Boolean),
+    };
     next.settings.logLimit = Number($('logLimit').value);
     next.settings.bypassList = $('bypassList').value.split(',').map((s) => s.trim()).filter(Boolean);
     next.settings.probe.url = $('probeUrl').value.trim();
@@ -1006,9 +1063,16 @@ $('btnTestRule').addEventListener('click', () => {
 
 
 for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retryDelay',
-  'fallbackImageTemplate', 'fallbackImageEnabled', 'probeUrl', 'probeTimeout',
+  'fallbackImageTemplate', 'fallbackImageEnabled', 'deepRetrySites', 'deepRetryEnabled',
+  'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
   $(id).addEventListener('change', saveSettings);
+}
+
+// 逐行的「这条为什么不能用」必须边打字边出现。等到 change（失焦或保存）才说，
+// 用户已经离开那个输入框了，提示与它指的那一行对不上
+for (const id of ['deepRetrySites', 'deepRetryEnabled']) {
+  $(id).addEventListener('input', renderDeepRetryWarning);
 }
 
 $('btnTestFallbackImage').addEventListener('click', async () => {
