@@ -5,13 +5,14 @@
  * 页面」；本文件只会被注册到用户逐条勾选的站点上（决策 D31），没勾的站点里连这段代码都
  * 不存在。风险因此从「可能把无关网站搞坏」收敛成「可能把你自己勾的那个站点搞坏」。
  *
- * 包住三个东西，它们的语义**并不一样**，别当成一回事：
+ * 包住四个东西，它们的语义**并不一样**，别当成一回事：
  *
  * | 包住的 | 页面看得到第一次失败吗 | 说明 |
  * |---|---|---|
  * | `fetch` | **看不到** | 页面 await 的是本文件返回的 promise，第一次 reject 被吞掉 |
  * | `XMLHttpRequest` | 看得到 | error 事件是浏览器同步派发的，插不进去 |
  * | `new Image()` | 看得到 | 同上，与现有 `<img>` 重试是同一种取舍 |
+ * | `document.createElement('img')` | 看得到 | 同上。**只管没挂进 DOM 的那些**，见下 |
  *
  * 后两者意味着：页面若在错误处理里做了「永久标记失败」或「自己也重试一次」，会出现双重
  * 处理。这是已知代价，写进了 LIMITATIONS。
@@ -46,6 +47,12 @@
   const nativeSend = NativeXHR && NativeXHR.prototype.send;
   const nativeSetHeader = NativeXHR && NativeXHR.prototype.setRequestHeader;
   const nativeAbort = NativeXHR && NativeXHR.prototype.abort;
+  // `document` 必须防御性地取：本文件也会被 tests/deep-patch.test.js 装进一个没有 DOM
+  // 的沙箱里真的执行，而一个 ReferenceError 会让整段补丁一行都不生效
+  const nativeDocument = typeof document === 'object' && document ? document : null;
+  const nativeCreateElement = nativeDocument ? nativeDocument.createElement : null;
+  const nativeCreateElementNS = nativeDocument ? nativeDocument.createElementNS : null;
+
   const nativeOn = EventTarget.prototype.addEventListener;
   const nativeOff = EventTarget.prototype.removeEventListener;
   const nativePost = window.postMessage.bind(window);
@@ -352,22 +359,48 @@
     };
   }
 
-  // ---------------------------------------------------------------- new Image()
+  // ---------------------------------------------------------------- 游离的 img
 
   /**
    * 这是缺口最大的一块。
    *
-   * 阅读器普遍用 `new Image()` 预加载下一页，而不挂进 DOM 的 Image 对象派发的 error
-   * 不经过 `document` 的捕获阶段 —— 隔离世界的 retry.js 永远看不见它。实测里这类请求
-   * 占了 481 次中的 301 次，重试对它是零覆盖（LIMITATIONS 第 16 节）。
+   * 阅读器普遍预加载下一页，而**不挂进 DOM** 的 img 派发的 error 不经过 `document` 的
+   * 捕获阶段 —— 隔离世界的 retry.js 永远看不见它。实测里这类请求占了 481 次中的 301 次，
+   * 重试对它是零覆盖（LIMITATIONS 第 16 节）。
    *
-   * 只包 `new Image()`。`document.createElement('img')` 不包：那种元素多半会被插进
-   * DOM，届时由 retry.js 接手，两边都插手会让一次失败被问两次。
+   * **1.4.5 起两条创建路都包。** 早先只包 `new Image()`，理由是「createElement 出来的
+   * 元素多半会被插进 DOM，届时由 retry.js 接手，两边都插手会让一次失败被问两次」。
+   * 顾虑本身成立，但把整条路让出去是错的：2026-08-23 的实测里某站用
+   * `document.createElement('img')` 预加载了 66 张大图，一张都不在 DOM 里 ——
+   * retry.js 看不见（游离），补丁也不管（没包），两套机制之间正好漏了一条路，
+   * 统计上表现为「深度重试恒为 0，而页面没捕获居高不下」。
+   *
+   * 分工改成按**出错那一刻连着 DOM 没有**来判：连着的归 retry.js，游离的归这里。
+   * 捕获阶段本来就看不到游离元素，所以这条线不会重叠 —— 比「按创建方式分」既严密
+   * 又少一个盲区。顺带把 `new Image()` 后又被 append 进 DOM 的那种双重询问也堵上了。
    */
+
   const imageBusy = new WeakSet();
+  /** 已经挂过 error 监听的 img。两条创建路可能落到同一个元素上，挂两次就会问两次 */
+  const imageWatched = new WeakSet();
+
+  /** 给一个 img 挂上失败监听。幂等 */
+  function watchImage(img) {
+    if (!img || imageWatched.has(img)) return img;
+    imageWatched.add(img);
+    nativeOn.call(img, 'error', () => { void onImageError(img); }, false);
+    return img;
+  }
+
+  function isImgTag(tag) {
+    return String(tag ?? '').toLowerCase() === 'img';
+  }
 
   async function onImageError(img) {
     if (imageBusy.has(img)) return;
+    // 挂在 DOM 里的图归 retry.js。两边都插手会让一次失败问后台两次，attempt 跳着涨、
+    // 上限提前用尽，而 recovered 会被记成两笔
+    if (img.isConnected) return;
     const url = img.currentSrc || img.src || '';
     if (!/^https?:/i.test(url)) return;
 
@@ -394,12 +427,28 @@
 
   if (typeof NativeImage === 'function') {
     const PatchedImage = function Image(width, height) {
-      const img = new NativeImage(width, height);
-      nativeOn.call(img, 'error', () => { void onImageError(img); }, false);
-      return img;
+      return watchImage(new NativeImage(width, height));
     };
     // 保住 `x instanceof Image`：页面里真有代码这么判断
     PatchedImage.prototype = NativeImage.prototype;
     window.Image = PatchedImage;
+  }
+
+  // 只改 `document` 这一个实例，不动 `Document.prototype`：页面自己
+  // `createHTMLDocument()` 造出来的文档与我们无关，iframe 各有各的补丁（allFrames）
+  if (typeof nativeCreateElement === 'function') {
+    nativeDocument.createElement = function createElement(tag, ...rest) {
+      const el = nativeCreateElement.call(this, tag, ...rest);
+      return isImgTag(tag) ? watchImage(el) : el;
+    };
+  }
+
+  if (typeof nativeCreateElementNS === 'function') {
+    nativeDocument.createElementNS = function createElementNS(ns, tag, ...rest) {
+      const el = nativeCreateElementNS.call(this, ns, tag, ...rest);
+      // SVG 的 `<image>` 局部名是 `image` 而不是 `img`，天然不会命中 —— 那是
+      // SVGImageElement，走的是另一套加载路径，本补丁不碰
+      return isImgTag(tag) ? watchImage(el) : el;
+    };
   }
 })();

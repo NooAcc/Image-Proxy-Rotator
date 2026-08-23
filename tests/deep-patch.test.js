@@ -172,6 +172,22 @@ function mount(respond) {
     removeAttribute(name) { this.removed.push(name); }
   }
 
+  /**
+   * 极简 document。
+   *
+   * 只需要 `createElement` / `createElementNS` 两个方法 —— 补丁会把它们就地换掉，
+   * 而沙箱与 VM 共享同一个对象，所以换完之后从外面调到的就是包过的版本。
+   * 造出来的 img 默认 `isConnected` 为 undefined，即「游离」：补丁该管的正是这些。
+   */
+  const fakeDocument = {
+    createElement(tag) {
+      return String(tag).toLowerCase() === 'img' ? new FakeImage() : new FakeEventTarget();
+    },
+    createElementNS(ns, tag) {
+      return String(tag).toLowerCase() === 'img' ? new FakeImage() : new FakeEventTarget();
+    },
+  };
+
   // ---- 沙箱 ----
 
   const sandbox = {
@@ -180,6 +196,7 @@ function mount(respond) {
     Date,
     EventTarget: FakeEventTarget,
     location: { href: 'https://nhentai.net/g/674439/' },
+    document: fakeDocument,
     fetch: fakeFetch,
     Request: FakeRequest,
     XMLHttpRequest: FakeXHR,
@@ -226,6 +243,9 @@ function mount(respond) {
     fetch: () => vmWindow.fetch,
     newXHR: () => new vmWindow.XMLHttpRequest(),
     newImage: () => new vmWindow.Image(),
+    /** `document.createElement(tag)`，走的是补丁包过的那个版本 */
+    create: (tag) => vmWindow.document.createElement(tag),
+    createNS: (tag) => vmWindow.document.createElementNS('http://www.w3.org/1999/xhtml', tag),
     /** 派发一个事件并把短定时器走完 */
     async emit(target, type, extra) {
       fire(target, type, extra);
@@ -467,6 +487,66 @@ test('Image 重发成功后回报 true 并清掉次数，下次裂开重新从 1
 
   await box.emit(img, 'error');
   assert.equal(box.asks()[1].attempt, 1, '成功之后必须忘掉计数');
+});
+
+// ---------------------------------------------------------------- 游离的 img
+
+test('createElement("img") 失败后同样重发 —— 实测里最大的那个缺口', async () => {
+  // 2026-08-23 某站用 createElement 预加载了 66 张大图，一张都不在 DOM 里：
+  // retry.js 看不见（游离），补丁当时也不管（只包 new Image()），两者之间漏了一整条路
+  const box = mount(alwaysRetry);
+  const img = box.create('img');
+  img.src = IMG;
+  const before = box.requests.length;
+
+  await box.emit(img, 'error');
+
+  assert.equal(box.asks().length, 1, 'createElement 出来的 img 也必须问后台');
+  assert.equal(box.asks()[0].via, 'image');
+  assert.equal(box.requests.length, before + 1);
+});
+
+test('createElementNS 造的 img 也包住 —— 换个命名空间不该逃掉', async () => {
+  const box = mount(alwaysRetry);
+  const img = box.createNS('img');
+  img.src = IMG;
+
+  await box.emit(img, 'error');
+  assert.equal(box.asks().length, 1);
+});
+
+test('挂进 DOM 的 img 一次都不问 —— 那是 retry.js 的地盘', async () => {
+  // 分工按「出错那一刻连着 DOM 没有」判，不按创建方式判。两边都插手会让一次失败
+  // 问后台两次：attempt 跳着涨、上限提前用尽，recovered 也会被记成两笔
+  const box = mount(alwaysRetry);
+  const img = box.create('img');
+  img.src = IMG;
+  img.isConnected = true;
+  const before = box.requests.length;
+
+  await box.emit(img, 'error');
+
+  assert.equal(box.asks().length, 0);
+  assert.equal(box.requests.length, before, '不该重发，隔离世界那边会接手');
+});
+
+test('new Image() 之后被挂进 DOM 的，同样让给 retry.js', async () => {
+  const box = mount(alwaysRetry);
+  const img = box.newImage();
+  img.src = IMG;
+  img.isConnected = true;
+
+  await box.emit(img, 'error');
+  assert.equal(box.asks().length, 0, '早先这种元素会被问两次');
+});
+
+test('createElement 对非 img 不插手，返回值也不能被换掉', async () => {
+  const box = mount(alwaysRetry);
+  const div = box.create('div');
+
+  assert.ok(div, 'createElement 必须原样返回它造出来的元素');
+  await box.emit(div, 'error');
+  assert.equal(box.asks().length, 0);
 });
 
 // ---------------------------------------------------------------- 通用约束
