@@ -8,8 +8,17 @@
  * 为什么轮询计数器在 PAC 里（决策 D2）：PAC 上下文在多次 FindProxyForURL 调用之间
  * 保持模块作用域变量，因此计数器可以驻留其中，无需每请求与 Service Worker 通信。
  *
+ * **PAC 管的是整个浏览器，不只是命中规则的那部分。** `chrome.proxy.settings.set` 替换
+ * 掉的是浏览器**整份**代理配置，包括「使用系统代理设置」。所以「没命中规则的请求返回
+ * 什么」不是一个无关紧要的默认值 —— 它决定了用户其余所有流量的出口。返回字面 `DIRECT`
+ * 会让靠本机代理客户端上网的人在启用本扩展后，除图片站以外的网站全部
+ * `ERR_CONNECTION_TIMED_OUT`，而扩展这边一个错都不报。这条路由由 `data.dflt` 表达，
+ * 详见 lib/default-proxy.js。
+ *
  * 生成的脚本必须满足五条硬约束：
- *   1. 顶层 try/catch 兜底返回 'DIRECT' —— 一条手误的正则不能让整个浏览器断网。
+ *   1. 顶层 try/catch 必须兜底 —— 一条手误的正则不能让整个浏览器断网。兜的是「规则之外的
+ *      流量」那一项（配了默认代理就是它，否则 'DIRECT'），外面再套一层 catch 保底到
+ *      'DIRECT'：读一个字符串不可能抛，但这是最后一道防线，不该有假设。
  *   2. 不含任何凭据 —— PAC 里写不了代理账号密码，认证走 webRequest.onAuthRequired。
  *   3. 所有用户输入一律经 JSON.stringify 注入，绝不字符串拼接。
  *   4. **产物必须是纯 ASCII** —— chrome.proxy 的 pacScript.data 只接受 ASCII，出现一个
@@ -24,6 +33,7 @@
 
 import { asciiJson, toAsciiHost } from './ascii.js';
 import { pacToken, isSelectable } from './node-model.js';
+import { defaultProxyToken } from './default-proxy.js';
 import { validateRule, wildcardToRegexSource, sanitizedScope } from './rule-matcher.js';
 
 /** 私有网段 / 本地地址的 shExpMatch 模式 */
@@ -136,6 +146,14 @@ function compile(config) {
       // 绕过项同样是主机名模式，同样要转码
       bypass: bypassList.map(toAsciiHost),
       privates: privatePatterns(),
+      /**
+       * 规则之外的流量走谁。空串 = 直连。
+       *
+       * 这一格是「注入 PAC 会替换掉浏览器整份代理配置」的唯一解药：没有它，所有没命中
+       * 规则的请求都会拿到字面 `DIRECT`，于是用户原先经本机代理客户端出去的通路整块消失
+       * （详见 lib/default-proxy.js 开头）。
+       */
+      dflt: defaultProxyToken(settings.defaultProxy) ?? '',
       tokens,
       pools,
     },
@@ -312,6 +330,15 @@ function PP_pick(tokens) {
   return picked;
 }
 
+// The route for everything this extension was not asked to touch. Injecting a PAC
+// replaces the browser's whole proxy configuration -- including "use the system
+// proxy" -- so returning a literal DIRECT here silently cuts off anyone who reaches
+// the internet through a local proxy client. Empty PP.dflt means the user really does
+// want plain direct connections.
+function PP_rest() {
+  return PP.dflt || 'DIRECT';
+}
+
 function FindProxyForURL(url, host) {
   try {
     // Forced routes come first, even when the master switch is off: measuring a
@@ -321,20 +348,33 @@ function FindProxyForURL(url, host) {
     var forced = PP_forced(url);
     if (forced) return forced;
 
-    if (!PP.enabled) return 'DIRECT';
+    // Master switch off: only a probe PAC ever gets here (applyProxy clears the
+    // setting outright), and a probe must not drag the rest of the browser along.
+    if (!PP.enabled) return PP_rest();
 
+    // Loopback and private ranges stay DIRECT no matter what. Sending 127.0.0.1 or
+    // 192.168.* through a proxy is never what anyone wants, and this list is also
+    // how the user's own proxy hosts stay reachable.
     if (PP_bypass(host)) return 'DIRECT';
 
     var tokens = PP_matchPool(url, host, PP_stripped(url));
-    if (!tokens) return 'DIRECT';
+    if (!tokens) return PP_rest();
 
     var picked = PP_pick(tokens);
-    if (!picked) return 'DIRECT';
+    // A matched rule with an empty pool. Unreachable in practice (applyProxy clears
+    // the setting when no node is selectable) but if it ever happens, the browser's
+    // usual route beats leaking a direct connection.
+    if (!picked) return PP_rest();
 
+    // The trailing DIRECT is what the "all attempts failed" setting says on the tin:
+    // show the image over a direct connection. Not PP_rest() -- the user picked
+    // "direct" knowing it exposes the real IP, and quietly routing it somewhere else
+    // would make that choice mean something different from what it says.
     return PP.fallback === 'direct' ? (picked + '; DIRECT') : picked;
   } catch (e) {
-    // Prefer sending everything direct over letting a PAC error kill the network.
-    return 'DIRECT';
+    // Never let a PAC error kill the network. Prefer the user's default route over a
+    // hard DIRECT, but reading it must not be able to throw a second time.
+    try { return PP.dflt || 'DIRECT'; } catch (e2) { return 'DIRECT'; }
   }
 }
 `;

@@ -7,6 +7,7 @@
 
 import { generatePac, pacSummary, canRouteProbe } from '../lib/pac-generator.js';
 import { isAscii } from '../lib/ascii.js';
+import { defaultProxyToken } from '../lib/default-proxy.js';
 import { getConfig, getRuntime, getLogger, saveRuntime } from './state.js';
 import { noteApplyMetric } from './metrics-store.js';
 import { syncDeepRetryScripts } from './deep-retry-injector.js';
@@ -48,10 +49,49 @@ export async function readControl() {
       levelOfControl: result.levelOfControl,
       mode: result.value?.mode ?? 'unknown',
       controlled: result.levelOfControl === 'controlled_by_this_extension',
+      /** 接管之前浏览器原本的代理模式；见 notePriorMode */
+      priorMode: getRuntime().priorProxyMode ?? null,
     };
   } catch (e) {
-    return { levelOfControl: 'unavailable', mode: 'unknown', controlled: false, error: String(e?.message || e) };
+    return { levelOfControl: 'unavailable', mode: 'unknown', controlled: false, priorMode: null, error: String(e?.message || e) };
   }
+}
+
+/**
+ * 接管之前先记下浏览器原本的代理模式。
+ *
+ * **这个信息只有这一个瞬间拿得到。** 一旦我们 `set()` 过，`get()` 就永远回
+ * `pac_script`，「用户原本是怎么上网的」再也问不出来。而它是本扩展最贵的那个静默故障的
+ * 唯一线索：注入 PAC 替换的是浏览器**整份**代理配置（含「使用系统代理」），于是没配默认
+ * 代理时，规则之外的流量从「经本机代理客户端出去」变成真·直连 —— 图片站一切正常，其余
+ * 网站全部 ERR_CONNECTION_TIMED_OUT，而扩展这边一个错都不报。
+ *
+ * 拿不到也不要紧（浏览器重启后我们本来就还握着控制权，问不出原始值）：这只是用来在日志里
+ * 说一句话，真正的解法是设置页里那一项。所以这里不写 storage、不做重试。
+ */
+async function notePriorMode(log) {
+  const runtime = getRuntime();
+  if (runtime.priorProxyMode) return;
+
+  const before = await readControl();
+  // 已经是我们在管：原始值早就被覆盖了，问不出来
+  if (before.controlled || before.levelOfControl === 'unavailable') return;
+  runtime.priorProxyMode = before.mode;
+
+  // 'direct' = 用户明确要求不走代理，接管它不会改变任何事，不值得说
+  if (before.mode === 'direct' || before.mode === 'unknown') return;
+
+  const config = await getConfig();
+  if (defaultProxyToken(config.settings.defaultProxy)) return;
+
+  if (dbg.on) dbg('pac', 'takeover', { priorMode: before.mode, level: before.levelOfControl });
+  log.add({
+    level: 'warn',
+    kind: 'proxy',
+    message: `已接管浏览器代理设置（原为「${before.mode}」）。规则之外的流量现在是**直连**：`
+      + '若你平时靠本机代理客户端或系统代理上网，那些网站会连不上（ERR_CONNECTION_TIMED_OUT）。'
+      + '需要保留原来的通路，请在设置页「规则之外的流量」里填上代理地址。',
+  });
 }
 
 /** 撤销本扩展的代理设置，恢复浏览器默认行为 */
@@ -117,6 +157,9 @@ export async function applyProxy() {
       skippedNodes: summary.skipped.nodes.length,
       skippedRules: summary.skipped.rules.length,
       forced: fallbackForceEntries(config).length,
+      // 规则之外的流量走哪：'direct' 时用户原有的系统代理已被这份 PAC 顶掉，
+      // 「除图片站外全部超时」的排查从这一格开始
+      rest: defaultProxyToken(config.settings.defaultProxy) ? 'default-proxy' : 'direct',
     });
   }
 
@@ -138,6 +181,10 @@ export async function applyProxy() {
     await saveRuntime();
     return { applied: false, summary, control };
   }
+
+  // 接管前的最后一刻：记下浏览器原本的代理模式（`set()` 之后就再也读不到了）。
+  // 放在 try 外面是刻意的 —— 它出问题不该被下面那个 catch 报成「注入代理设置失败」
+  await notePriorMode(log);
 
   try {
     await chrome.proxy.settings.set({

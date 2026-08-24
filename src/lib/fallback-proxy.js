@@ -12,36 +12,29 @@
  *
  * **兜底代理不是节点。** 它不进 `config.nodes`、不测速、不自动禁用、不参与轮询、
  * 不进 `perNode` 统计。它唯一的身份是「用尽之后那一次重试该走谁」。
- * 但它在 PAC 里的写法必须与节点逐字一致，所以 token 格式化共用 `proxy-token.js`。
+ * 但它在 PAC 里的写法必须与节点逐字一致，所以 token 格式化共用 `proxy-token.js`，
+ * 地址解析共用 `proxy-address.js`。
+ *
+ * **它也不是「规则之外的流量走谁」。** 那是 `default-proxy.js` 管的另一件事。两者可以
+ * 填成同一个地址，但触发条件毫不相干：兜底只在一张图用尽 maxAttempts 之后对该图源短暂
+ * 开窗，默认代理则对所有没命中规则的请求长期生效。
  *
  * 本文件是纯逻辑，不碰 `chrome.*`（决策 D6）。刻意**不引** `schema.js` ——
  * `node-parser.js` 已经引了它，再引会绕成循环。
  */
 
-import { SUPPORTED_PROTOCOLS, PROTOCOL_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE, DEFAULT_PORTS } from './constants.js';
+import { emptyProxyAddress, parseProxyAddress } from './proxy-address.js';
 import { proxyToken } from './proxy-token.js';
-
-/** `scheme://` 前缀 */
-const SCHEME_RE = /^([A-Za-z][A-Za-z0-9+.-]*):\/\//;
-
-function asText(value) {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-/** 去掉 IPv6 字面量外层的方括号 */
-function stripBrackets(host) {
-  return String(host ?? '').replace(/^\[/, '').replace(/\]$/, '');
-}
 
 /** @returns 全新的空兜底代理 */
 export function emptyFallbackProxy() {
-  return { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' };
+  return emptyProxyAddress();
 }
 
 /**
  * 把用户填的一行地址解析成兜底代理。
  *
- * 接受的写法与节点完全一致，好让用户不必记两套语法：
+ * 接受的写法与节点、默认代理完全一致，好让用户不必记几套语法：
  *   · `http://10.0.0.3:37581`
  *   · `https://user:pass@proxy.lan:8443`
  *   · `10.0.0.3:37581`（没写 scheme 时按 http 处理）
@@ -50,65 +43,11 @@ export function emptyFallbackProxy() {
  * @returns {{ok: true, value: object} | {ok: false, reason: string}}
  */
 export function parseFallbackProxy(text) {
-  const raw = asText(text);
-  if (!raw) return { ok: false, reason: '请填写兜底代理地址' };
-  if (/\s/.test(raw)) return { ok: false, reason: '地址里不能有空格' };
-
-  const withScheme = SCHEME_RE.test(raw) ? raw : `http://${raw}`;
-  const scheme = SCHEME_RE.exec(withScheme)[1].toLowerCase();
-
-  if (!SUPPORTED_PROTOCOLS.includes(scheme)) {
-    const label = PROTOCOL_LABELS[scheme] || scheme.toUpperCase();
-    return { ok: false, reason: `${label}：${UNSUPPORTED_PROTOCOL_MESSAGE}` };
-  }
-
-  let url;
-  try {
-    url = new URL(withScheme);
-  } catch {
-    return { ok: false, reason: '这不是一个合法的代理地址（可能是端口越界）' };
-  }
-
-  const host = stripBrackets(url.hostname);
-  if (!host) return { ok: false, reason: '缺少主机名' };
-
-  const port = url.port ? Number.parseInt(url.port, 10) : DEFAULT_PORTS[scheme];
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return { ok: false, reason: '端口不合法（必须是 1-65535）' };
-  }
-
-  // 路径对正向代理毫无意义，写了几乎一定是把它当成改写型图片服务了 —— 那是 1.4.x 的
-  // 形态，静默忽略只会让用户以为自己填对了
-  if (url.pathname !== '/' || url.search) {
-    return {
-      ok: false,
-      reason: '兜底代理只要「地址:端口」，不要路径或查询串。'
-        + '带 `?url=` 的是改写型图片服务（如 wsrv.nl），本版本已改用 HTTP 代理',
-    };
-  }
-
-  const value = {
-    enabled: false,
-    raw,
-    protocol: scheme,
-    host,
-    port,
-    username: decodeSafe(url.username),
-    password: decodeSafe(url.password),
-  };
-
-  // 走一遍 token：格式化是可用性的唯一判定点，这里过不了就等于配了个用不上的东西
-  if (!proxyToken(value)) return { ok: false, reason: '无法把这个地址写进分流脚本' };
-
-  return { ok: true, value };
-}
-
-function decodeSafe(value) {
-  try {
-    return decodeURIComponent(String(value ?? ''));
-  } catch {
-    return String(value ?? '');
-  }
+  return parseProxyAddress(text, {
+    noun: '兜底代理',
+    // 填了路径几乎一定是把它当成了改写型图片服务 —— 那是 1.4.x 的形态
+    pathHint: '带 `?url=` 的是改写型图片服务（如 wsrv.nl），本版本已改用 HTTP 代理',
+  });
 }
 
 /**

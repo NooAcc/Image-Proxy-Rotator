@@ -337,6 +337,59 @@
       </section>
 
       <!--
+        规则之外的流量。
+        这一节修的是本项目最贵的一次静默故障：注入 PAC 会替换掉浏览器整份代理配置
+        （含「使用系统代理」），于是规则外的流量变成真·直连 —— 靠本机代理客户端上网的人
+        会看到「图片站正常、其余网站全部超时」，而扩展一个错都不报。
+        所以这一节的帮助文字必须把「为什么会这样」说在用户能看到的地方。
+      -->
+      <section class="card">
+        <div class="card__head"><h2>规则之外的流量</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>为什么这里需要你填一次</summary>
+          <div class="card__help__body">
+            <p>浏览器只有<strong>一份</strong>代理设置。本扩展一生效就会整份接管它 ——
+              包括你原来的「使用系统代理设置」。于是没命中规则的请求会拿到<strong>真·直连</strong>，
+              而不是「照旧走你本机的代理客户端」。</p>
+            <p>如果你平时靠本机客户端（Clash、sing-box、v2rayN 等）或系统代理上网，
+              这会表现为：<strong>图片站一切正常，其余网站全部
+              <code>ERR_CONNECTION_TIMED_OUT</code></strong>。扩展这边不会报任何错 ——
+              它确实按你写的规则做了它该做的事。</p>
+            <p>填上你客户端的代理端口（多数是混合端口，例如 <code>http://127.0.0.1:7897</code>），
+              规则之外的流量就会照旧从那里出去，与没装本扩展时一样。</p>
+            <p><strong>扩展读不到系统代理的地址</strong>，所以只能由你填一次：Chrome 出于隐私
+              只告诉扩展「在用系统代理」，不说它指向哪里。</p>
+            <p><code>127.0.0.1</code>、<code>192.168.*</code> 等本地与私有地址始终直连，
+              不受这里影响；总开关关闭时整份分流设置都不生效，浏览器会回到它自己的代理设置。</p>
+          </div>
+        </details>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="defaultProxyMode">规则没命中时</label>
+            <select id="defaultProxyMode">
+              <option value="direct">直连（默认，你原有的系统代理会失效）</option>
+              <option value="proxy">走指定代理（保留原来的上网通路）</option>
+            </select>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="defaultProxyRaw">默认代理</label>
+            <input type="text" id="defaultProxyRaw" spellcheck="false"
+              placeholder="http://127.0.0.1:7897">
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="defaultProxyUser">默认代理账号</label>
+            <input type="text" id="defaultProxyUser" spellcheck="false" autocomplete="off"
+              placeholder="不需要认证就留空">
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="defaultProxyPass">默认代理密码</label>
+            <input type="password" id="defaultProxyPass" autocomplete="off">
+          </div>
+        </div>
+        <div class="banner banner--warn" id="defaultProxyWarning" hidden></div>
+      </section>
+
+      <!--
         重试与兜底。
         这张卡里的三件事是有先后的：先换节点重发，再切到兜底代理重发，最后才是「直连还是裂图」。
         「全部失败后」选直连会让前两步整块失效（图片静默走直连、不派发 error），
@@ -484,7 +537,8 @@
         <details class="card__help">
           <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>绕过列表怎么写</summary>
           <div class="card__help__body">
-            <p>逗号分隔，列出的主机<strong>永不走代理</strong>。</p>
+            <p>逗号分隔，列出的主机<strong>永不走代理</strong>（既不走节点，也不走默认代理，
+              而是直连）。</p>
             <p>本地地址与私有网段（<code>127.0.0.1</code>、<code>192.168.*</code> 等）始终绕过，
               无需在此列出。</p>
           </div>

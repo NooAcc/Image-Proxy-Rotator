@@ -55,7 +55,8 @@ const BLIND_RULE = { id: 'r_bbbbbbb2', name: '扩展名', type: 'regex', pattern
 async function seed(partial = {}) {
   stub.reset();
   Object.assign(getRuntime(), {
-    startIndex: 0, control: null, summary: null, lastApplyAt: null, lastApplyError: null, probing: false,
+    startIndex: 0, control: null, summary: null, lastApplyAt: null, lastApplyError: null,
+    probing: false, priorProxyMode: null,
   });
   await setConfig(normalizeConfig({ enabled: true, rules: [RULE], ...partial }));
   // 统计缓存活在模块作用域里，stub.reset() 清不掉它 —— 必须显式清零，
@@ -950,4 +951,103 @@ test('分位数与平均值一起给出 —— 平均值对长尾没有抵抗力
   assert.ok(Number.isFinite(metrics.requests.latencyP50), 'p50 应当给出具体数值');
   assert.ok(Number.isFinite(metrics.requests.latencyP90), 'p90 应当给出具体数值');
   assert.ok(metrics.requests.latencyP90 >= metrics.requests.latencyP50, 'p90 不该小于 p50');
+});
+
+// ---------------------------------------------------------------- 规则之外的流量
+
+/**
+ * 这一组守的是本项目最贵的一次静默故障。
+ *
+ * 注入 PAC 替换的是浏览器**整份**代理配置，包括「使用系统代理设置」。所以没配默认代理时，
+ * 规则之外的流量拿到的是**真·直连** —— 靠本机代理客户端上网的人会看到「图片站一切正常、
+ * 其余网站全部 ERR_CONNECTION_TIMED_OUT」，而扩展这边一个错都不报，因为它确实按用户写的
+ * 规则做了它该做的事。
+ */
+
+/** 规则外的某个站点，PAC 眼里的样子 */
+const OTHER = browserUrl('https://unrelated.example/page');
+const DEFAULT_PROXY = { enabled: true, raw: 'http://127.0.0.1:7897' };
+
+test('配了默认代理后，注入的 PAC 让规则外流量走它而不是直连', async () => {
+  await seed({
+    nodes: [nodeFixture('n_aaaaaaa1')],
+    settings: { defaultProxy: DEFAULT_PROXY },
+  });
+  await applyProxy();
+  const pac = loadPac(stub.lastPac());
+
+  assert.equal(pac.find(...OTHER), 'PROXY 127.0.0.1:7897');
+  assert.match(pac.find(...IMG), /^PROXY aaaaaaa1\.px:8080/, '命中规则的照旧走节点');
+});
+
+test('没配默认代理时规则外流量仍是 DIRECT —— 老配置的行为一个字都不变', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await applyProxy();
+  assert.equal(loadPac(stub.lastPac()).find(...OTHER), 'DIRECT');
+});
+
+test('接管一个非直连的浏览器代理设置且没配默认代理时，必须明说规则外流量已变直连', async () => {
+  // 这条日志是这个故障唯一的自动线索：接管之后 proxy.settings.get() 永远只回
+  // pac_script，「用户原本是怎么上网的」再也问不出来
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  stub.setControl('controllable_by_this_extension');
+  stub.setSettingsValue({ mode: 'system' });
+
+  await applyProxy();
+
+  const text = textOf(await logsOf({ kind: 'proxy' }));
+  assert.match(text, /已接管浏览器代理设置/);
+  assert.match(text, /ERR_CONNECTION_TIMED_OUT/, '要说出用户会看到的现象，而不是只说「已接管」');
+  assert.equal(getRuntime().priorProxyMode, 'system');
+});
+
+test('配了默认代理时不再唠叨那条告警 —— 原来的通路已经被保住了', async () => {
+  await seed({
+    nodes: [nodeFixture('n_aaaaaaa1')],
+    settings: { defaultProxy: DEFAULT_PROXY },
+  });
+  stub.setControl('controllable_by_this_extension');
+  stub.setSettingsValue({ mode: 'system' });
+
+  await applyProxy();
+
+  assert.doesNotMatch(textOf(await logsOf({ kind: 'proxy' })), /已接管浏览器代理设置/);
+  assert.equal(getRuntime().priorProxyMode, 'system', '模式照旧记下来，供状态页展示');
+});
+
+test('浏览器原本就是直连时不告警 —— 接管它不改变任何事', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  stub.setControl('controllable_by_this_extension');
+  stub.setSettingsValue({ mode: 'direct' });
+
+  await applyProxy();
+
+  assert.doesNotMatch(textOf(await logsOf({ kind: 'proxy' })), /已接管浏览器代理设置/);
+});
+
+test('已经是本扩展在管时问不出原始模式，也就不该乱猜', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  // stub 默认就是 controlled_by_this_extension
+  await applyProxy();
+
+  assert.equal(getRuntime().priorProxyMode, null);
+  assert.doesNotMatch(textOf(await logsOf({ kind: 'proxy' })), /已接管浏览器代理设置/);
+});
+
+test('默认代理要求认证时自动应答 —— 否则每开一个网站都弹一次认证框', async () => {
+  await seed({
+    nodes: [nodeFixture('n_aaaaaaa1')],
+    settings: {
+      defaultProxy: { enabled: true, raw: 'http://gate.lan:3128', username: 'bob', password: 'hunter2' },
+    },
+  });
+  const entry = stub.listeners.onAuthRequired[0];
+  const got = await new Promise((resolve) => entry.fn({
+    isProxy: true,
+    requestId: 'auth-dflt',
+    challenger: { host: 'gate.lan', port: 3128 },
+  }, resolve));
+
+  assert.deepEqual(got.authCredentials, { username: 'bob', password: 'hunter2' });
+  assert.match(textOf(await logsOf({ kind: 'proxy' })), /默认代理 gate\.lan:3128/);
 });

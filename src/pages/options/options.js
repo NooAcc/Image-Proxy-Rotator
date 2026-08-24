@@ -22,6 +22,7 @@ import { pacUrl, isSanitizedScheme } from '../../lib/pac-url.js';
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
 import { selectablePool } from '../../lib/scheduler.js';
 import { parseFallbackProxy } from '../../lib/fallback-proxy.js';
+import { parseDefaultProxy, defaultProxyWarnings } from '../../lib/default-proxy.js';
 import { RULE_TYPE_LABELS, UNSUPPORTED_PROTOCOL_MESSAGE } from '../../lib/constants.js';
 
 const $ = (id) => document.getElementById(id);
@@ -158,6 +159,17 @@ function renderRunState() {
         text: control.controlled ? '由本扩展掌握' : `${control.levelOfControl}（可能被占用）`,
       })
       : '未知'),
+    // 「规则之外的流量走哪」必须出现在状态里。接管浏览器代理设置会连带顶掉「使用系统代理」，
+    // 而那件事的唯一现象是「除图片站外全部网站超时」—— 排查时第一眼要能看到这一格。
+    // 顺带把接管前的原始模式也写出来：它是「你原来确实在走代理」的凭证
+    kvRow('规则之外的流量', config.settings.defaultProxy.enabled
+      ? el('span', { class: 'status status--ok', text: `走 ${config.settings.defaultProxy.raw}` })
+      : el('span', {
+        class: control?.priorMode && control.priorMode !== 'direct' ? 'status status--warn' : 'status status--muted',
+        text: control?.priorMode && control.priorMode !== 'direct'
+          ? `直连（接管前浏览器是「${control.priorMode}」）`
+          : '直连',
+      })),
     kvRow('上次注入分流脚本', stats.lastApplyAt
       ? `${fmtTime(stats.lastApplyAt)}（${fmtAgo(stats.lastApplyAt)}）`
       : '从未'),
@@ -637,6 +649,10 @@ function renderSettings() {
   $('fallbackProxyUser').value = s.fallbackProxy.username;
   $('fallbackProxyPass').value = s.fallbackProxy.password;
   $('fallbackProxyEnabled').checked = s.fallbackProxy.enabled;
+  $('defaultProxyMode').value = s.defaultProxy.enabled ? 'proxy' : 'direct';
+  $('defaultProxyRaw').value = s.defaultProxy.raw;
+  $('defaultProxyUser').value = s.defaultProxy.username;
+  $('defaultProxyPass').value = s.defaultProxy.password;
   $('deepRetrySites').value = (s.deepRetry?.sites ?? []).join('\n');
   $('deepRetryEnabled').checked = s.deepRetry?.enabled === true;
   $('probeUrl').value = s.probe.url;
@@ -649,6 +665,7 @@ function renderSettings() {
   $('recoverProbe').checked = s.probe.recoverProbe;
   renderRetryWarning();
   renderDeepRetryWarning();
+  renderDefaultProxyWarning();
 }
 
 /**
@@ -721,6 +738,42 @@ function renderRetryWarning() {
     return;
   }
   setBanner($('retryWarning'), '');
+}
+
+/**
+ * 「规则之外的流量」这一节的警示。
+ *
+ * 三种情况，都必须说出来：
+ *
+ * 1. **选了直连**（默认）。这不是错，但后果得让用户当场看见：注入 PAC 会替换掉浏览器
+ *    整份代理配置（含「使用系统代理」），所以规则之外的网站变成真·直连。靠本机客户端
+ *    上网的人会看到「图片站正常、其余网站全部 ERR_CONNECTION_TIMED_OUT」，而扩展一个错
+ *    都不报 —— 这正是本项目最贵的那类静默故障。
+ * 2. **地址填了但不可用**：规范化时会强制关掉开关（见 lib/schema.js），得说清为什么。
+ * 3. **存得下但多半不如所愿**（例如填成了轮询节点），交给 defaultProxyWarnings()。
+ */
+function renderDefaultProxyWarning() {
+  const dp = config.settings.defaultProxy;
+  const raw = dp.raw;
+  const check = raw ? parseDefaultProxy(raw) : { ok: true };
+
+  if (raw && !check.ok) {
+    setBanner($('defaultProxyWarning'),
+      `默认代理地址不可用，已自动停用（规则之外的流量将直连）：${check.reason}`,
+      'warn');
+    return;
+  }
+  if (!dp.enabled) {
+    setBanner($('defaultProxyWarning'),
+      '规则之外的流量当前是直连。本扩展一生效就会接管浏览器整份代理设置，'
+      + '你原来的「使用系统代理」不再生效 —— 若你平时靠本机代理客户端上网，'
+      + '除图片站以外的网站会连不上（ERR_CONNECTION_TIMED_OUT）。'
+      + '要保留原来的通路，把客户端的端口填在上面并改选「走指定代理」。',
+      'warn');
+    return;
+  }
+  const notes = defaultProxyWarnings(dp, config.nodes);
+  setBanner($('defaultProxyWarning'), notes.join(' '), 'warn');
 }
 
 function renderControlWarning(control) {
@@ -873,6 +926,12 @@ const saveSettings = debounce(async () => {
       raw: $('fallbackProxyRaw').value.trim(),
       username: $('fallbackProxyUser').value,
       password: $('fallbackProxyPass').value,
+    };
+    next.settings.defaultProxy = {
+      enabled: $('defaultProxyMode').value === 'proxy',
+      raw: $('defaultProxyRaw').value.trim(),
+      username: $('defaultProxyUser').value,
+      password: $('defaultProxyPass').value,
     };
     next.settings.deepRetry = {
       enabled: $('deepRetryEnabled').checked,
@@ -1078,6 +1137,7 @@ $('btnTestRule').addEventListener('click', () => {
 
 for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retryDelay',
   'fallbackProxyRaw', 'fallbackProxyUser', 'fallbackProxyPass', 'fallbackProxyEnabled',
+  'defaultProxyMode', 'defaultProxyRaw', 'defaultProxyUser', 'defaultProxyPass',
   'deepRetrySites', 'deepRetryEnabled',
   'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
@@ -1092,6 +1152,21 @@ for (const id of ['deepRetrySites', 'deepRetryEnabled']) {
 
 // 兜底代理地址同理：不可用的原因要边打字边说，别等保存之后才发现开关自己关了
 $('fallbackProxyRaw').addEventListener('input', renderRetryWarning);
+
+// 默认代理更要边打字边说：这一项配错的后果是「除图片站外全部网站超时」，
+// 而那个现象看起来完全不像是这个输入框造成的
+$('defaultProxyRaw').addEventListener('input', () => {
+  // 打字过程中 config 还是旧的，先把当前输入喂进去，否则提示总慢一拍
+  config.settings.defaultProxy = { ...config.settings.defaultProxy, raw: $('defaultProxyRaw').value.trim() };
+  renderDefaultProxyWarning();
+});
+$('defaultProxyMode').addEventListener('change', () => {
+  config.settings.defaultProxy = {
+    ...config.settings.defaultProxy,
+    enabled: $('defaultProxyMode').value === 'proxy',
+  };
+  renderDefaultProxyWarning();
+});
 
 $('btnExportFile').addEventListener('click', async () => {
   await guard(async () => {

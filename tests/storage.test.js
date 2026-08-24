@@ -207,3 +207,81 @@ test('重试与兜底设置能跟着配置导出再导入', () => {
   assert.equal(back.settings.fallbackProxy.raw, 'http://10.0.0.3:37581');
   assert.equal(back.settings.fallbackProxy.port, 37581);
 });
+
+// ---------------------------------------------------------------- 默认代理（规则之外的流量）
+
+test('默认配置里默认代理是关着的 —— 规则外流量直连，与 1.5.0 及更早一致', () => {
+  assert.deepEqual(normalizeConfig({}).settings.defaultProxy,
+    { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' });
+});
+
+test('默认代理地址可用时可以启用，并被拆成 host/port', () => {
+  const dp = normalizeConfig({
+    settings: { defaultProxy: { enabled: true, raw: '  http://127.0.0.1:7897  ' } },
+  }).settings.defaultProxy;
+  assert.equal(dp.enabled, true);
+  assert.equal(dp.raw, 'http://127.0.0.1:7897');
+  assert.equal(dp.host, '127.0.0.1');
+  assert.equal(dp.port, 7897);
+});
+
+test('默认代理没写 scheme 时按 http 处理 —— 三个框一套语法', () => {
+  const dp = normalizeConfig({
+    settings: { defaultProxy: { enabled: true, raw: '127.0.0.1:7897' } },
+  }).settings.defaultProxy;
+  assert.equal(dp.enabled, true);
+  assert.equal(dp.protocol, 'http');
+  assert.equal(dp.port, 7897);
+});
+
+test('默认代理的凭据也能从地址里解出来', () => {
+  const dp = normalizeConfig({
+    settings: { defaultProxy: { enabled: true, raw: 'https://u:p%40ss@proxy.lan:8443' } },
+  }).settings.defaultProxy;
+  assert.equal(dp.username, 'u');
+  assert.equal(dp.password, 'p@ss');
+});
+
+test('默认代理地址不可用时强制关闭，但保留原文', () => {
+  // 这一项被强制关掉的后果比兜底代理严重：兜底关掉只是少一层重试，而这一项关掉意味着
+  // 所有非规则流量都变回直连，靠本机代理客户端上网的人会直接断网。所以设置页必须能拿到
+  // 原文来说明「为什么关了」
+  for (const raw of [
+    'socks5://127.0.0.1:7890',      // 本机客户端常见的 SOCKS 端口，但 PAC 表达不了
+    'http://127.0.0.1:7897/proxy',  // 填了路径
+    'http://127.0.0.1:99999',       // 端口越界
+    'http://:7897',                 // 缺主机名
+    'not a url',                    // 有空格
+  ]) {
+    const dp = normalizeConfig({ settings: { defaultProxy: { enabled: true, raw } } }).settings.defaultProxy;
+    assert.equal(dp.enabled, false, `${raw} 不该被启用`);
+    assert.equal(dp.raw, raw, '用户填的原文不该被抹掉');
+  }
+});
+
+test('默认代理设置本身是垃圾时回落到默认值', () => {
+  for (const defaultProxy of [undefined, null, 'x', 42, []]) {
+    assert.deepEqual(normalizeConfig({ settings: { defaultProxy } }).settings.defaultProxy,
+      { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' });
+  }
+});
+
+test('默认代理与兜底代理是两个独立字段，互不干扰', () => {
+  const s = normalizeConfig({
+    settings: {
+      fallbackProxy: { enabled: true, raw: 'http://10.0.0.3:37581' },
+      defaultProxy: { enabled: true, raw: 'http://127.0.0.1:7897' },
+    },
+  }).settings;
+  assert.equal(s.fallbackProxy.port, 37581);
+  assert.equal(s.defaultProxy.port, 7897);
+});
+
+test('默认代理能跟着配置导出再导入', () => {
+  const cfg = normalizeConfig({
+    settings: { defaultProxy: { enabled: true, raw: 'http://127.0.0.1:7897' } },
+  });
+  const back = importConfig(exportConfig(cfg), normalizeConfig({}), { merge: false });
+  assert.equal(back.settings.defaultProxy.enabled, true);
+  assert.equal(back.settings.defaultProxy.port, 7897);
+});

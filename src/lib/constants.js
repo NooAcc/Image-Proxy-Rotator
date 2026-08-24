@@ -174,9 +174,32 @@ export function defaultRetrySettings() {
   };
 }
 
+/**
+ * 兜底代理与默认代理的存储形状完全相同（都是「一个 HTTP/HTTPS 正向代理 + 启用开关」），
+ * 所以只留一份工厂 —— 第三处重复迟早会漏改一处字段。
+ * 两者语义上毫不相干，见 lib/fallback-proxy.js 与 lib/default-proxy.js 的开头注释。
+ */
+function emptyProxyEntry() {
+  return { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' };
+}
+
 /** @returns 全新的默认兜底代理设置 */
 export function defaultFallbackProxy() {
-  return { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' };
+  return emptyProxyEntry();
+}
+
+/**
+ * @returns 全新的默认「默认代理」设置
+ *
+ * 名字确实叠了字：设置项叫 `defaultProxy`（规则之外的流量走谁），本文件里所有工厂都以
+ * `default` 开头表示「该项的默认值」，于是拼出了 defaultDefaultProxy。
+ *
+ * **默认关闭，即规则外流量直连** —— 这是 1.5.0 及更早的行为，不能因为新增了这一项就
+ * 悄悄改变现有用户的出口。而它也无法有一个有意义的默认地址：Chrome 不告诉扩展系统代理
+ * 指向哪里（见 lib/default-proxy.js）。
+ */
+export function defaultDefaultProxy() {
+  return emptyProxyEntry();
 }
 
 /**
@@ -237,6 +260,14 @@ export function defaultSettings() {
     rotateEvery: 1,
     retry: defaultRetrySettings(),
     fallbackProxy: defaultFallbackProxy(),
+    /**
+     * 规则之外的流量走谁。默认关闭 = 直连。
+     *
+     * 这一项补的是一个静默且致命的缺口：注入 PAC 会替换掉浏览器**整份**代理配置，
+     * 包括「使用系统代理」。靠本机代理客户端上网的人一启用本扩展，图片站按规则走节点、
+     * 一切看着正常，而其余网站全部 ERR_CONNECTION_TIMED_OUT。详见 lib/default-proxy.js。
+     */
+    defaultProxy: defaultDefaultProxy(),
     deepRetry: defaultDeepRetry(),
     probe: defaultProbeSettings(),
     logLimit: 200,

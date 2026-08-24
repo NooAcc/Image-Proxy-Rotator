@@ -529,3 +529,100 @@ test('没有 forceEntries 时行为与从前完全一致', () => {
   const pac = loadPac(generatePac(cfg({ rules: [WIDE] }), {}));
   assert.match(pac.find(...IMG), /^PROXY a\.px|^PROXY b\.px/);
 });
+
+// ---------------------------------------------------------------- 规则之外的流量
+
+/**
+ * 这一组守的是本项目最贵的一次静默故障：注入 PAC 会替换掉浏览器**整份**代理配置
+ * （含「使用系统代理」），于是规则外的流量从「经本机代理客户端出去」变成真·直连 ——
+ * 图片站按规则走节点、一切看着正常，而其余网站全部 ERR_CONNECTION_TIMED_OUT，
+ * 扩展这边一个错都不报。详见 src/lib/default-proxy.js 开头。
+ */
+
+const DFLT = '127.0.0.1:7897';
+const DFLT_TOKEN = 'PROXY 127.0.0.1:7897';
+const OTHER = browserUrl('https://other.com/a.jpg');
+
+/** 带默认代理的配置 */
+function dfltCfg(o = {}) {
+  const c = cfg(o);
+  c.settings.defaultProxy = {
+    enabled: true, raw: DFLT, protocol: 'http', host: '127.0.0.1', port: 7897,
+    username: '', password: '',
+  };
+  return c;
+}
+
+test('配了默认代理时，没命中规则的请求走默认代理而不是直连', () => {
+  const pac = loadPac(generatePac(dfltCfg(), {}));
+  assert.equal(pac.find(...OTHER), DFLT_TOKEN);
+});
+
+test('没配默认代理时行为与从前完全一致 —— 仍然是 DIRECT', () => {
+  const pac = loadPac(generatePac(cfg(), {}));
+  assert.equal(pac.find(...OTHER), 'DIRECT');
+});
+
+test('默认代理只是没启用时也回落到 DIRECT', () => {
+  const c = dfltCfg();
+  c.settings.defaultProxy.enabled = false;
+  assert.equal(loadPac(generatePac(c, {})).find(...OTHER), 'DIRECT');
+});
+
+test('默认代理地址不可用时回落到 DIRECT，不产出半截 token', () => {
+  const c = dfltCfg();
+  c.settings.defaultProxy.protocol = 'socks5';
+  const pac = generatePac(c, {});
+  assert.match(pac, /"dflt":""/, '不可用就必须是空串，不能是 "undefined" / "null" 这类字面量');
+  assert.equal(loadPac(pac).find(...OTHER), 'DIRECT');
+});
+
+test('默认代理不影响命中规则的请求 —— 它们照旧进轮询池', () => {
+  const pac = loadPac(generatePac(dfltCfg(), { startIndex: 0 }));
+  assert.ok(pac.find(...MANGA).startsWith('PROXY a.px:8080'));
+  assert.ok(pac.find(...MANGA).startsWith('PROXY b.px:8080'), '轮询计数器不受影响');
+});
+
+test('绕过列表与私有网段永远直连，绝不送进默认代理', () => {
+  const pac = loadPac(generatePac(dfltCfg(), {}));
+  assert.equal(pac.find('http://localhost/x', 'localhost'), 'DIRECT');
+  assert.equal(pac.find('http://127.0.0.1:7897/', '127.0.0.1'), 'DIRECT',
+    '默认代理自己的地址必须直连，否则就是自环');
+  assert.equal(pac.find('http://10.0.0.3:24014/', '10.0.0.3'), 'DIRECT');
+  assert.equal(pac.find('http://192.168.1.2/', '192.168.1.2'), 'DIRECT');
+});
+
+test('fallback=direct 时命中规则的尾部仍是字面 DIRECT —— 那个设置说的就是直连', () => {
+  const c = dfltCfg();
+  c.settings.fallback = 'direct';
+  const got = loadPac(generatePac(c, {})).find(...MANGA);
+  assert.match(got, /; DIRECT$/, `实际：${got}`);
+});
+
+test('兜底窗口与测速定向压得过默认代理', () => {
+  const pac = loadPac(generatePac(dfltCfg({ rules: [WIDE] }), {
+    probeNodeId: 'b',
+    forceEntries: [{ pre: 'https://img.manga.com/', tok: FB, until: Date.now() + 60000 }],
+  }));
+  assert.equal(pac.find(...IMG), FB, '兜底窗口优先');
+  assert.ok(pac.find(...PROBE).startsWith('PROXY b.px'), '测速优先');
+});
+
+test('主开关关闭时（探测用 PAC）规则外流量仍走默认代理，不把整个浏览器拖下水', () => {
+  const c = dfltCfg({ enabled: false });
+  const pac = loadPac(generatePac(c, { probeNodeId: 'b' }));
+  assert.equal(pac.find(...OTHER), DFLT_TOKEN);
+  assert.ok(pac.find(...PROBE).startsWith('PROXY b.px'), '测速本身照旧被强制定向');
+});
+
+test('默认代理是中文域名时，PAC 仍然是纯 ASCII', () => {
+  const c = dfltCfg();
+  c.settings.defaultProxy.host = '图床.com';
+  const pac = generatePac(c, {});
+  assert.ok(isAscii(pac), '一个非 ASCII 字节就会让整份 PAC 被浏览器拒收');
+  assert.match(loadPac(pac).find(...OTHER), /^PROXY xn--/);
+});
+
+test('默认代理不进 pacSummary 的节点计数 —— 它不是节点', () => {
+  assert.equal(pacSummary(dfltCfg()).nodeCount, pacSummary(cfg()).nodeCount);
+});

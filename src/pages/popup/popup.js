@@ -329,9 +329,18 @@ function renderMetrics(box) {
   ));
 
   const apply = metrics.apply;
+  const dflt = config.settings.defaultProxy;
   box.append(section('运行',
     el('div', { class: 'ranks' },
       el('p', { class: 'hint', text: `上次注入分流脚本：${fmtAgo(stats.lastApplyAt)}` }),
+      // 「规则之外的流量走哪」是「除图片站外全部网站超时」的唯一线索：本扩展一生效就整份
+      // 接管浏览器代理设置，把用户原来的系统代理一起顶掉了。排查得从这一行开始
+      el('p', {
+        class: 'hint',
+        text: dflt.enabled
+          ? `规则之外的流量：走 ${dflt.raw}`
+          : '规则之外的流量：直连（原有的系统代理已被本扩展顶掉）',
+      }),
       el('p', { class: 'hint', text: `注入成功 ${apply.ok} 次 / 失败 ${apply.fail} 次` }),
       el('p', { class: 'hint', text: `测速成功 ${metrics.probe.ok} 次 / 失败 ${metrics.probe.fail} 次` }),
       el('p', {

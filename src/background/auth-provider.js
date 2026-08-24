@@ -7,13 +7,14 @@
  *
  * 需要 `webRequest` + `webRequestAuthProvider` 两个权限。
  *
- * 只对 HTTP/HTTPS 代理节点与兜底代理应答 —— 本程序不支持其他代理类型，那些节点也不会被
- * PAC 选中，因此永远不会走到这里。
+ * 只对 HTTP/HTTPS 代理节点、兜底代理与默认代理应答 —— 本程序不支持其他代理类型，
+ * 那些节点也不会被 PAC 选中，因此永远不会走到这里。
  */
 
 import { getConfig, getLogger } from './state.js';
 import { isSupported, protocolLabel } from '../lib/node-model.js';
 import { fallbackProxyToken } from '../lib/fallback-proxy.js';
+import { defaultProxyToken } from '../lib/default-proxy.js';
 
 /** 已尝试过的 requestId：凭据错误时避免无限重试 */
 const tried = new Set();
@@ -80,6 +81,18 @@ async function resolveCredentials(details) {
     return { authCredentials: { username: fallback.username, password: fallback.password } };
   }
 
+  // 默认代理同理，而且漏掉这一段更难受：它承担的是「规则之外的全部流量」，
+  // 于是每开一个网站都弹一次认证框，看起来像整个浏览器坏了
+  const dflt = config.settings.defaultProxy;
+  if (defaultProxyToken(dflt) && dflt.host === host && Number(dflt.port) === port && dflt.username) {
+    log.add({
+      level: 'info',
+      kind: 'proxy',
+      message: `已为默认代理 ${host}:${port} 自动提供凭据`,
+    });
+    return { authCredentials: { username: dflt.username, password: dflt.password } };
+  }
+
   // 如果地址对得上但协议不受支持，要说清楚原因，而不是让用户以为是密码错了
   const mismatched = config.nodes.find((n) => n.host === host && Number(n.port) === port);
   log.add({
@@ -87,7 +100,7 @@ async function resolveCredentials(details) {
     kind: 'proxy',
     message: mismatched && !isSupported(mismatched)
       ? `代理 ${host}:${port} 要求认证，但该节点是 ${protocolLabel(mismatched.protocol)} 类型，本程序仅支持 HTTP/HTTPS 代理`
-      : `代理 ${host}:${port} 要求认证，但节点列表与兜底代理里都没有匹配的账号密码，该请求可能失败`,
+      : `代理 ${host}:${port} 要求认证，但节点列表、兜底代理与默认代理里都没有匹配的账号密码，该请求可能失败`,
   });
   return {};
 }

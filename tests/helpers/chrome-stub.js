@@ -214,6 +214,14 @@ export function installChromeStub() {
     setControl(value) {
       levelOfControl = value;
     },
+    /**
+     * 伪造「浏览器原本的代理设置」。
+     * 配合 setControl('controllable_by_this_extension') 使用，用来复现
+     * 「用户本来在走系统代理，被本扩展接管」那一瞬间 —— 那是 priorMode 唯一读得到的时机。
+     */
+    setSettingsValue(value) {
+      settingsValue = value;
+    },
     setSettingsError(message) {
       settingsThrows = message;
     },

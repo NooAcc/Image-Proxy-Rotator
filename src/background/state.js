@@ -26,6 +26,11 @@ const runtime = {
   startIndex: 0,
   /** 最近一次 chrome.proxy 控制权检查结果 */
   control: null,
+  /**
+   * 接管之前浏览器原本的代理模式（'system' / 'direct' / 'fixed_servers' …）。
+   * 只有「从未接管 → 接管」那一个瞬间读得到，见 proxy-controller.notePriorMode()。
+   */
+  priorProxyMode: null,
   /** 最近一次 PAC 注入摘要 */
   summary: null,
   /** 上次成功注入的时间 */
@@ -51,6 +56,7 @@ export async function getConfig() {
         fallback: cache.settings.fallback,
         retry: cache.settings.retry,
         fallbackProxy: cache.settings.fallbackProxy.enabled,
+        defaultProxy: cache.settings.defaultProxy.enabled,
       });
     }
   }

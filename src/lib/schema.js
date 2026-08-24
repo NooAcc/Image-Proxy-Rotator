@@ -11,9 +11,10 @@ import {
   STRATEGIES, FALLBACKS, DEFAULT_PROBE_URL, DEFAULT_BYPASS_LIST,
   RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS,
   defaultConfig, defaultSettings, defaultProbeSettings,
-  defaultRetrySettings, defaultFallbackProxy, defaultDeepRetry,
+  defaultRetrySettings, defaultFallbackProxy, defaultDefaultProxy, defaultDeepRetry,
 } from './constants.js';
 import { parseFallbackProxy } from './fallback-proxy.js';
+import { parseDefaultProxy } from './default-proxy.js';
 import { deepRetryPatterns, DEEP_RETRY_SITE_CAP } from './deep-retry.js';
 import { stableId, isValidId } from './hash.js';
 
@@ -205,6 +206,36 @@ export function normalizeFallbackProxy(raw) {
 }
 
 /**
+ * 规范化默认代理设置（规则之外的流量走谁）。
+ *
+ * 与 `normalizeFallbackProxy` 逐条同构，也共用同一份解析：地址不可用时强制
+ * `enabled=false` 但保留原文，好让设置页能说出它为什么没被启用。
+ *
+ * 这一项被强制关掉的后果比兜底代理严重得多 —— 兜底关掉只是少一层重试，
+ * 而这一项关掉意味着**所有非规则流量都变成直连**，靠本机代理客户端上网的人会直接断网
+ * （见 lib/default-proxy.js 开头）。所以设置页必须把「为什么关了」说在字段旁边。
+ */
+export function normalizeDefaultProxy(raw) {
+  const base = defaultDefaultProxy();
+  if (!isPlainObject(raw)) return base;
+
+  const text = asString(raw.raw).trim()
+    || (raw.host ? `${asString(raw.protocol) || 'http'}://${asString(raw.host)}:${raw.port}` : '');
+  if (!text) return base;
+
+  const parsed = parseDefaultProxy(text);
+  if (!parsed.ok) return { ...base, raw: text };
+
+  return {
+    ...parsed.value,
+    // 凭据不写在地址里时（设置页有单独的输入框）仍要保住
+    username: parsed.value.username || asString(raw.username),
+    password: parsed.value.password || asString(raw.password),
+    enabled: raw.enabled === true,
+  };
+}
+
+/**
  * 规范化深度重试设置。
  *
  * 与 `normalizeFallbackProxy` 同一条纪律：**一条可用站点都没有时强制 `enabled=false`，
@@ -240,6 +271,7 @@ export function normalizeSettings(raw) {
     rotateEvery: clampInt(raw.rotateEvery, 1, 1000, base.rotateEvery),
     retry: normalizeRetrySettings(raw.retry),
     fallbackProxy: normalizeFallbackProxy(raw.fallbackProxy),
+    defaultProxy: normalizeDefaultProxy(raw.defaultProxy),
     deepRetry: normalizeDeepRetry(raw.deepRetry),
     probe: normalizeProbeSettings(raw.probe),
     logLimit: clampInt(raw.logLimit, 10, 2000, base.logLimit),
