@@ -12,6 +12,8 @@ import {
   RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS,
   defaultConfig, defaultSettings, defaultProbeSettings,
   defaultRetrySettings, defaultFallbackProxy, defaultDefaultProxy, defaultDeepRetry,
+  defaultEasyProxiesSettings,
+  EASY_PROXIES_DEFAULT_BASE_URL, EASY_PROXIES_MAX_NODES_CAP,
 } from './constants.js';
 import { parseFallbackProxy } from './fallback-proxy.js';
 import { parseDefaultProxy } from './default-proxy.js';
@@ -257,6 +259,42 @@ export function normalizeDeepRetry(raw) {
   };
 }
 
+/**
+ * 规范化 Easy Proxies 自动拉取设置。
+ *
+ * 管理地址必须能解析成 http/https URL；没写 scheme 时自动补 http://。
+ * 数量夹到 [1, 500]，间隔夹到 [0, 1440]（0 = 不做定时，仅启动时/手动同步）。
+ * 最近一次同步的状态字段原样保留，便于设置页展示，不参与开关判定。
+ */
+export function normalizeEasyProxiesSettings(raw) {
+  const base = defaultEasyProxiesSettings();
+  if (!isPlainObject(raw)) return base;
+
+  let baseUrl = EASY_PROXIES_DEFAULT_BASE_URL;
+  const text = asString(raw.baseUrl).trim();
+  if (text) {
+    const withScheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(text) ? text : `http://${text}`;
+    try {
+      const parsed = new URL(withScheme);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') baseUrl = withScheme;
+    } catch {
+      // 非法地址回落默认
+    }
+  }
+
+  const lastSyncCount = Number.parseInt(raw.lastSyncCount, 10);
+  return {
+    enabled: raw.enabled === true,
+    baseUrl,
+    password: asString(raw.password),
+    maxNodes: clampInt(raw.maxNodes, 1, EASY_PROXIES_MAX_NODES_CAP, base.maxNodes),
+    intervalMinutes: clampInt(raw.intervalMinutes, 0, 1440, base.intervalMinutes),
+    lastSyncAt: Number.isFinite(raw.lastSyncAt) ? Math.round(raw.lastSyncAt) : null,
+    lastSyncCount: Number.isInteger(lastSyncCount) && lastSyncCount >= 0 ? lastSyncCount : null,
+    lastSyncError: raw.lastSyncError == null ? null : asString(raw.lastSyncError),
+  };
+}
+
 export function normalizeSettings(raw) {
   const base = defaultSettings();
   if (!isPlainObject(raw)) return base;
@@ -273,6 +311,7 @@ export function normalizeSettings(raw) {
     fallbackProxy: normalizeFallbackProxy(raw.fallbackProxy),
     defaultProxy: normalizeDefaultProxy(raw.defaultProxy),
     deepRetry: normalizeDeepRetry(raw.deepRetry),
+    easyProxies: normalizeEasyProxiesSettings(raw.easyProxies),
     probe: normalizeProbeSettings(raw.probe),
     logLimit: clampInt(raw.logLimit, 10, 2000, base.logLimit),
     bypassList,

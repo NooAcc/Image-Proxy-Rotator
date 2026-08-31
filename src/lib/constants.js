@@ -21,6 +21,15 @@ export const PROBE_PARAM = '__pp_node';
 /** chrome.alarms 中定时探测任务的名字 */
 export const ALARM_PROBE = 'pp-probe';
 
+/** chrome.alarms 中 Easy Proxies 自动拉取任务的名字 */
+export const ALARM_EASY_PROXIES = 'pp-easy-proxies';
+
+/** Easy Proxies 管理地址的默认值（用户局域网部署） */
+export const EASY_PROXIES_DEFAULT_BASE_URL = 'http://10.0.0.3:19090';
+
+/** 自动拉取节点数量的硬上限（与「满配 500 节点」的存储上限一致） */
+export const EASY_PROXIES_MAX_NODES_CAP = 500;
+
 /** 延迟超过该值即标记为 slow（毫秒） */
 export const SLOW_LATENCY_MS = 2000;
 
@@ -236,6 +245,26 @@ export function defaultDeepRetry() {
   return { enabled: false, sites: [] };
 }
 
+/** @returns 全新的默认 Easy Proxies 自动拉取设置 */
+export function defaultEasyProxiesSettings() {
+  return {
+    /** 是否启用「启动时 + 定时」自动同步；手动「立即同步」不受此开关限制 */
+    enabled: false,
+    /** easy_proxies 管理地址，例如 http://10.0.0.3:19090 */
+    baseUrl: EASY_PROXIES_DEFAULT_BASE_URL,
+    /** 管理密码（为空表示该实例不需要登录） */
+    password: '',
+    /** 最多拉取多少条（可用节点不足时按实际数量） */
+    maxNodes: 15,
+    /** 定时同步间隔（分钟）；0 = 只启动时同步一次，不做定时 */
+    intervalMinutes: 60,
+    /** 最近一次同步的结果（供设置页展示，属于状态字段） */
+    lastSyncAt: null,
+    lastSyncCount: null,
+    lastSyncError: null,
+  };
+}
+
 /** @returns 全新的默认设置对象 */
 export function defaultSettings() {
   return {
@@ -269,6 +298,7 @@ export function defaultSettings() {
      */
     defaultProxy: defaultDefaultProxy(),
     deepRetry: defaultDeepRetry(),
+    easyProxies: defaultEasyProxiesSettings(),
     probe: defaultProbeSettings(),
     logLimit: 200,
     bypassList: [...DEFAULT_BYPASS_LIST],

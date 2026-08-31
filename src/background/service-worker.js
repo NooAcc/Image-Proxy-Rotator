@@ -10,11 +10,12 @@ import { getConfig, getLogger, saveRuntime } from './state.js';
 import { applyProxy } from './proxy-controller.js';
 import { handleMessage } from './messaging.js';
 import { onAlarm, scheduleProbeAlarm } from './health-monitor.js';
+import { onEasyProxiesAlarm, scheduleEasyProxiesAlarm, syncIfEnabled } from './easy-proxies-sync.js';
 import { installRequestLogger } from './request-logger.js';
 import { installAuthProvider } from './auth-provider.js';
 import { dbg, initDebug } from './debug-store.js';
 import { unsupportedNodes, protocolLabel } from '../lib/node-model.js';
-import { ALARM_PROBE, UNSUPPORTED_PROTOCOL_MESSAGE } from '../lib/constants.js';
+import { ALARM_PROBE, ALARM_EASY_PROXIES, UNSUPPORTED_PROTOCOL_MESSAGE } from '../lib/constants.js';
 
 // ---- 事件注册（顶层同步）----
 
@@ -27,15 +28,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener((details) => {
   boot(details.reason === 'update' ? '扩展更新' : '扩展安装');
+  void booting.then(() => syncIfEnabled()).catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {
   boot('浏览器启动');
+  void booting.then(() => syncIfEnabled()).catch(() => {});
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM_PROBE) {
     onAlarm().catch(() => {
+      /* 定时任务失败不应让 SW 崩溃，错误已写入日志 */
+    });
+  } else if (alarm.name === ALARM_EASY_PROXIES) {
+    onEasyProxiesAlarm().catch(() => {
       /* 定时任务失败不应让 SW 崩溃，错误已写入日志 */
     });
   }
@@ -75,6 +82,7 @@ async function runBoot(reason) {
     }
     await applyProxy();
     await scheduleProbeAlarm();
+    await scheduleEasyProxiesAlarm();
     log.add({
       level: 'info',
       kind: 'system',

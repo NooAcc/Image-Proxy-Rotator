@@ -194,6 +194,52 @@
       </section>
 
       <section class="card">
+        <div class="card__head"><h2>Easy Proxies 自动拉取</h2></div>
+        <details class="card__help">
+          <summary><span class="card__help__icon" aria-hidden="true">ⓘ</span>自动拉取怎么工作</summary>
+          <div class="card__help__body">
+            <p>从 easy_proxies 管理接口按最近探测延迟拉取最优节点（可用且未拉黑），
+              填入节点列表。每次同步只替换由本功能管理的节点，手写节点不受影响；
+              可用节点不足时按实际数量填入。</p>
+            <p>管理地址没写协议时自动补 <code>http://</code>；填了密码会先调用
+              <code>/api/auth</code> 登录。代理主机名取管理地址的主机名。</p>
+          </div>
+        </details>
+        <label class="check">
+          <input type="checkbox" id="easyProxiesEnabled"> 启用启动时与定时自动同步
+        </label>
+        <div class="field-grid">
+          <div class="field field--inline">
+            <label class="field__label" for="easyProxiesBaseUrl">管理地址</label>
+            <input type="text" id="easyProxiesBaseUrl" spellcheck="false"
+              placeholder="http://10.0.0.3:19090">
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="easyProxiesPassword">管理密码（可选）</label>
+            <input type="password" id="easyProxiesPassword" autocomplete="new-password">
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="easyProxiesMaxNodes">最多拉取</label>
+            <div class="field__control">
+              <input type="number" id="easyProxiesMaxNodes" min="1" max="500" step="1">
+              <span class="field__unit">条（不足时按实际）</span>
+            </div>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="easyProxiesInterval">自动同步间隔</label>
+            <div class="field__control">
+              <input type="number" id="easyProxiesInterval" min="0" max="1440" step="1">
+              <span class="field__unit">分钟（0 = 仅启动时/手动）</span>
+            </div>
+          </div>
+        </div>
+        <div class="btn-row">
+          <button type="button" class="btn btn--primary" id="btnEasyProxiesSync">立即拉取并同步</button>
+        </div>
+        <p class="hint" id="easyProxiesStatus" role="status"></p>
+      </section>
+
+      <section class="card">
         <div class="card__head">
           <h2>节点列表</h2>
           <div class="btn-row">

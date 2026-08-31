@@ -663,9 +663,31 @@ function renderSettings() {
   $('bypassList').value = s.bypassList.join(', ');
   $('autoDisable').checked = s.probe.autoDisable;
   $('recoverProbe').checked = s.probe.recoverProbe;
+  const ep = s.easyProxies;
+  $('easyProxiesEnabled').checked = ep.enabled;
+  $('easyProxiesBaseUrl').value = ep.baseUrl;
+  $('easyProxiesPassword').value = ep.password;
+  $('easyProxiesMaxNodes').value = ep.maxNodes;
+  $('easyProxiesInterval').value = ep.intervalMinutes;
+  renderEasyProxiesStatus();
   renderRetryWarning();
   renderDeepRetryWarning();
   renderDefaultProxyWarning();
+}
+
+/** Easy Proxies 同步状态：最近一次同步时间/条数，失败时给出原因 */
+function renderEasyProxiesStatus() {
+  const ep = config.settings.easyProxies;
+  const node = $('easyProxiesStatus');
+  if (ep.lastSyncError) {
+    setBanner(node, `上次同步失败：${ep.lastSyncError}`, 'warn');
+    return;
+  }
+  const parts = [];
+  if (ep.lastSyncAt) parts.push(`上次同步 ${fmtAgo(ep.lastSyncAt)}`);
+  if (Number.isInteger(ep.lastSyncCount)) parts.push(`共 ${ep.lastSyncCount} 条`);
+  node.className = 'hint';
+  announce(node, parts.length ? parts.join('，') : (ep.enabled ? '已启用，尚未同步' : '未启用'));
 }
 
 /**
@@ -945,6 +967,14 @@ const saveSettings = debounce(async () => {
     next.settings.probe.failureThreshold = Number($('failureThreshold').value);
     next.settings.probe.autoDisable = $('autoDisable').checked;
     next.settings.probe.recoverProbe = $('recoverProbe').checked;
+    next.settings.easyProxies = {
+      ...next.settings.easyProxies,
+      enabled: $('easyProxiesEnabled').checked,
+      baseUrl: $('easyProxiesBaseUrl').value.trim(),
+      password: $('easyProxiesPassword').value,
+      maxNodes: Number($('easyProxiesMaxNodes').value),
+      intervalMinutes: Number($('easyProxiesInterval').value),
+    };
 
     const res = await send('saveConfig', { config: next });
     await refresh({ config: res.config });
@@ -1012,6 +1042,23 @@ $('btnProbeAll').addEventListener('click', async () => {
     setBanner($('globalError'), `测速完成：${ok}/${res.results.length} 个节点可用`,
       ok === res.results.length ? 'ok' : 'warn');
   });
+  button.disabled = false;
+  button.textContent = original;
+});
+
+$('btnEasyProxiesSync').addEventListener('click', async () => {
+  const button = $('btnEasyProxiesSync');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = '同步中…';
+  await guard(async () => {
+    const res = await send('easyProxiesSync');
+    await refresh({ config: res.config });
+    setBanner($('easyProxiesStatus'),
+      `同步完成：可用 ${res.total} 条，新增 ${res.added} 条`
+        + (res.removed ? `，移除旧自动节点 ${res.removed} 条` : ''),
+      'ok');
+  }, 'easyProxiesStatus');
   button.disabled = false;
   button.textContent = original;
 });
@@ -1139,6 +1186,8 @@ for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retry
   'fallbackProxyRaw', 'fallbackProxyUser', 'fallbackProxyPass', 'fallbackProxyEnabled',
   'defaultProxyMode', 'defaultProxyRaw', 'defaultProxyUser', 'defaultProxyPass',
   'deepRetrySites', 'deepRetryEnabled',
+  'easyProxiesEnabled', 'easyProxiesBaseUrl', 'easyProxiesPassword',
+  'easyProxiesMaxNodes', 'easyProxiesInterval',
   'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
   $(id).addEventListener('change', saveSettings);

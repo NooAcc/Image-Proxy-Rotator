@@ -13,6 +13,7 @@ import { getConfig, setConfig, updateConfig, getLogger, getRuntime, saveRuntime 
 import { applyProxy, readControl, previewPac } from './proxy-controller.js';
 import { metricsView, resetMetrics as clearMetrics, flushMetrics } from './metrics-store.js';
 import { probeNode as runProbeNode, probeAll as runProbeAll, scheduleProbeAlarm, resetNodeState as runResetNodeState } from './health-monitor.js';
+import { syncNow as runEasyProxiesSync, scheduleEasyProxiesAlarm } from './easy-proxies-sync.js';
 import { planRetry, noteRetryOutcome } from './retry-coordinator.js';
 import {
   dbg,
@@ -99,9 +100,15 @@ const handlers = {
     await setConfig(config);
     const result = await applyProxy();
     await scheduleProbeAlarm();
+    await scheduleEasyProxiesAlarm();
     const log = await getLogger();
     log.add({ level: 'info', kind: 'config', message: '配置已保存' });
     return { ok: true, config: await getConfig(), summary: result.summary };
+  },
+
+  /** 手动触发一次 Easy Proxies 同步（不受自动开关限制） */
+  async easyProxiesSync() {
+    return runEasyProxiesSync();
   },
 
   async addNodes({ text, merge = true }) {
@@ -314,6 +321,7 @@ const handlers = {
     await setConfig(next);
     await applyProxy();
     await scheduleProbeAlarm();
+    await scheduleEasyProxiesAlarm();
     // 覆盖导入会整批换掉节点/规则 id，立刻落盘一次把旧 id 的计数并进 retired，
     // 别让它们在存储里挂到下一个节流窗口
     await flushMetrics();
