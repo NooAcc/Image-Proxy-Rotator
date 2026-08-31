@@ -382,7 +382,7 @@ Metrics {
 ## 测试策略
 
 ```bash
-npm test    # 675 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
+npm test    # 699 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
 npm run check
 ```
 
@@ -442,4 +442,3 @@ UI 这一层大部分没有 DOM 环境，所以只测**能静态判定、且出�
 `chrome.proxy.settings.set` 收到的 PAC 原文取出来，丢进同一个 `node:vm` 沙箱执行，
 以此断言「测速连续失败 → 节点被自动禁用 → 重新注入的 PAC 真的不再选中它」这条链路。
 `src/background/` 的模块在导入时就会读 `chrome.storage.local`，所以测试必须**先装替身再动态导入**。
-
