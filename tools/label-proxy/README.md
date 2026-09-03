@@ -24,6 +24,9 @@
 npm run label-proxy
 ```
 
+Windows 也可以直接双击本目录下的 `start.bat`，效果相同：它会用默认参数启动
+HTTP 服务，不依赖 npm 或配置文件。
+
 它会用默认值启动 HTTP 服务：
 
 - 服务地址：`http://127.0.0.1:19191`
