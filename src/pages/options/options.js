@@ -677,6 +677,8 @@ function renderSettings() {
   $('easyProxiesPassword').value = ep.password;
   $('easyProxiesMaxNodes').value = ep.maxNodes;
   $('easyProxiesInterval').value = ep.intervalMinutes;
+  $('easyProxiesLabelServiceUrl').value = ep.labelServiceUrl || '';
+  $('easyProxiesLabelServiceToken').value = ep.labelServiceToken || '';
   renderEasyProxiesStatus();
   renderRetryWarning();
   renderDeepRetryWarning();
@@ -694,6 +696,7 @@ function renderEasyProxiesStatus() {
   const parts = [];
   if (ep.lastSyncAt) parts.push(`上次同步 ${fmtAgo(ep.lastSyncAt)}`);
   if (Number.isInteger(ep.lastSyncCount)) parts.push(`共 ${ep.lastSyncCount} 条`);
+  if (ep.labelServiceUrl) parts.push('经本地标签转换');
   node.className = 'hint';
   announce(node, parts.length ? parts.join('，') : (ep.enabled ? '已启用，尚未同步' : '未启用'));
 }
@@ -983,6 +986,8 @@ const saveSettings = debounce(async () => {
       password: $('easyProxiesPassword').value,
       maxNodes: Number($('easyProxiesMaxNodes').value),
       intervalMinutes: Number($('easyProxiesInterval').value),
+      labelServiceUrl: $('easyProxiesLabelServiceUrl').value.trim(),
+      labelServiceToken: $('easyProxiesLabelServiceToken').value,
     };
 
     const res = await send('saveConfig', { config: next });
@@ -1197,6 +1202,7 @@ for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retry
   'deepRetrySites', 'deepRetryEnabled',
   'easyProxiesEnabled', 'easyProxiesBaseUrl', 'easyProxiesPassword',
   'easyProxiesMaxNodes', 'easyProxiesInterval',
+  'easyProxiesLabelServiceUrl', 'easyProxiesLabelServiceToken',
   'probeUrl', 'probeTimeout',
   'probeInterval', 'failureThreshold', 'logLimit', 'bypassList', 'autoDisable', 'recoverProbe']) {
   $(id).addEventListener('change', saveSettings);
