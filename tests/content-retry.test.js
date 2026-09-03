@@ -170,7 +170,14 @@ function mount(respond, options = {}) {
       storage: {
         local: {
           get(_key, callback) {
-            callback(options.debug ? { debug: { enabled: true } } : {});
+            const got = {};
+            if (options.debug) got.debug = { enabled: true };
+            if (_key === 'config' || _key == null) {
+              got.config = {
+                settings: { retry: { slowTimeoutMs: options.watchdogMs ?? 0 } },
+              };
+            }
+            callback(got);
           },
         },
         onChanged: { addListener() {} },
@@ -180,6 +187,12 @@ function mount(respond, options = {}) {
   sandbox.globalThis = sandbox;
   runInContext(SOURCE, createContext(sandbox));
   assert.ok(onError, '脚本必须在 document 上注册 error 监听');
+
+  const fireDoc = (type, target) => {
+    const fn = docHandlers[type];
+    assert.ok(fn, `document 上必须注册 ${type} 监听`);
+    fn({ target });
+  };
 
   return {
     sent,
@@ -196,11 +209,16 @@ function mount(respond, options = {}) {
       sandbox.document.visibilityState = 'hidden';
       docHandlers.visibilitychange?.();
     },
+    /** 触发一次 document 捕获阶段的事件（loadstart / load / abort） */
+    fireDoc,
+    start: (target) => fireDoc('loadstart', target),
+    loaded: (target) => fireDoc('load', target),
+    aborted: (target) => fireDoc('abort', target),
     /** 明确推进假时钟，跑掉到期的定时器（验超时那几条用） */
     tick: async (ms) => {
       now += ms;
       fireDue();
-      await flush();
+      await autoAdvance();
     },
   };
 }
@@ -253,6 +271,83 @@ test('currentSrc 优先于 src —— srcset 选中的才是真正失败的那�
   el.currentSrc = 'https://cdn.manga.com/large.jpg';
   await page.fail(el);
   assert.equal(page.asks()[0].url, 'https://cdn.manga.com/large.jpg');
+});
+
+// ---------------------------------------------------------------- 慢图看门狗
+
+test('看门狗开启时，图片超过阈值仍没加载完就带 cause:"slow" 问后台并换节点', async () => {
+  const page = mount(alwaysRetry, { watchdogMs: 1000 });
+  const el = img(IMG_URL);
+  page.start(el);
+
+  await page.tick(800);
+  assert.equal(page.asks().length, 0, '没到阈值不动手，大图只是慢不是坏');
+
+  await page.tick(201);
+  assert.equal(page.asks().length, 1);
+  assert.deepEqual(plain(page.asks()[0]),
+    { type: 'imageRetryAsk', url: IMG_URL, attempt: 1, cause: 'slow' });
+  assert.deepEqual(el.srcWrites, [IMG_URL], '超时后要重新赋值 src，下一次 PAC 轮询会换节点');
+});
+
+test('看门狗关闭时只等事件，不主动打断慢图', async () => {
+  const page = mount(alwaysRetry, { watchdogMs: 0 });
+  const el = img(IMG_URL);
+  page.start(el);
+
+  await page.tick(60000);
+  assert.equal(page.asks().length, 0);
+  assert.equal(el.srcWrites.length, 0);
+});
+
+test('图片在阈值前加载完成，看门狗不再问', async () => {
+  const page = mount(alwaysRetry, { watchdogMs: 1000 });
+  const el = img(IMG_URL);
+  page.start(el);
+  page.loaded(el);
+
+  await page.tick(2000);
+  assert.equal(page.asks().length, 0);
+});
+
+test('看门狗重发后如果新节点也慢，尝试次数继续递增而不是从头数', async () => {
+  const page = mount(alwaysRetry, { watchdogMs: 1000 });
+  const el = img(IMG_URL);
+  page.start(el);
+
+  await page.tick(1001);
+  assert.equal(page.asks().length, 1);
+  assert.equal(el.srcWrites.length, 1, '前提：第一次看门狗已经换过节点');
+
+  await page.tick(1001);
+  assert.equal(page.asks().length, 2);
+  assert.equal(page.asks()[1].attempt, 2, '第二次慢加载不能把第一次的尝试次数清零');
+});
+
+test('后台对慢请求回 give-up 时不打断原请求，让它自己继续等', async () => {
+  const page = mount(() => ({ ok: true, action: 'give-up', reason: 'exhausted' }), { watchdogMs: 1000 });
+  const el = img(IMG_URL);
+  page.start(el);
+
+  await page.tick(1001);
+  assert.equal(page.asks()[0].cause, 'slow');
+  assert.equal(el.srcWrites.length, 0, '没有可换的节点时，原请求还挂着，不该被我们清掉');
+});
+
+test('自己换节点触发的旧请求 abort/error 不再多问一次', async () => {
+  const page = mount(alwaysRetry, { watchdogMs: 1000 });
+  const el = img(IMG_URL);
+  page.start(el);
+
+  await page.tick(1001);
+  assert.equal(el.srcWrites.length, 1, '前提：第一次超时已经触发重发');
+
+  // 重新赋值 src 会中止旧请求；这个 error 是我们自己造成的，不是新节点失败
+  await page.fail(el);
+  assert.equal(page.asks().length, 1, '旧请求的失败不该再消耗一次重试');
+  assert.equal(el.srcWrites.length, 1);
+
+  page.start(el); // 新请求正式开始
 });
 
 // ---------------------------------------------------------------- 重发

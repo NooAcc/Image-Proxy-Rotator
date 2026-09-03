@@ -345,8 +345,8 @@ const handlers = {
    * 这是页面与后台之间唯一的「决定」型消息。规则匹配与次数上限都在后台（决策 D21），
    * 页面侧不持有任何规则副本。
    */
-  async imageRetryAsk({ url, attempt, via }) {
-    const plan = await planRetry({ url, attempt, via });
+  async imageRetryAsk({ url, attempt, via, cause }) {
+    const plan = await planRetry({ url, attempt, via, cause });
     return { ok: true, ...plan };
   },
 

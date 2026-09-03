@@ -103,7 +103,7 @@ test('未来版本号不崩溃，按当前版本尽力读取', () => {
 
 test('默认配置带上重试与兜底，且兜底默认不启用', () => {
   const s = normalizeConfig({}).settings;
-  assert.deepEqual(s.retry, { maxAttempts: 3, delayMs: 300 });
+  assert.deepEqual(s.retry, { maxAttempts: 3, delayMs: 300, slowTimeoutMs: 12000 });
   assert.deepEqual(s.fallbackProxy,
     { enabled: false, raw: '', protocol: 'http', host: '', port: 0, username: '', password: '' });
 });
@@ -135,10 +135,22 @@ test('重试次数与间隔被夹进合法区间', () => {
   assert.equal(tooSmall.delayMs, 0, '0 毫秒是合法的：用户可以选择不等');
 });
 
+test('看门狗默认 12 秒开启，0 可关闭，超限值被夹到 60 秒', () => {
+  const dflt = normalizeConfig({}).settings.retry;
+  assert.equal(dflt.slowTimeoutMs, 12000, '默认开着，否则慢图看门狗对老用户没有任何作用');
+
+  const off = normalizeConfig({ settings: { retry: { slowTimeoutMs: 0 } } }).settings.retry;
+  assert.equal(off.slowTimeoutMs, 0, '0 = 显式关闭看门狗');
+
+  const capped = normalizeConfig({ settings: { retry: { slowTimeoutMs: 999999 } } }).settings.retry;
+  assert.equal(capped.slowTimeoutMs, 60000, '超过上限说明配置被写坏，不能让它无限等待');
+});
+
 test('重试设置缺失或是垃圾时回落到默认值', () => {
   for (const retry of [undefined, null, 'x', [], { maxAttempts: 'abc' }]) {
     const s = normalizeConfig({ settings: { retry } }).settings.retry;
     assert.equal(s.maxAttempts, 3, `${JSON.stringify(retry)}`);
+    assert.equal(s.slowTimeoutMs, 12000, `${JSON.stringify(retry)} 缺看门狗字段时回落默认`);
   }
 });
 
@@ -197,12 +209,12 @@ test('兜底设置本身是垃圾时回落到默认值，不让整份配置失�
 test('重试与兜底设置能跟着配置导出再导入', () => {
   const cfg = normalizeConfig({
     settings: {
-      retry: { maxAttempts: 5, delayMs: 0 },
+      retry: { maxAttempts: 5, delayMs: 0, slowTimeoutMs: 8000 },
       fallbackProxy: { enabled: true, raw: 'http://10.0.0.3:37581' },
     },
   });
   const back = importConfig(exportConfig(cfg), normalizeConfig({}), { merge: false });
-  assert.deepEqual(back.settings.retry, { maxAttempts: 5, delayMs: 0 });
+  assert.deepEqual(back.settings.retry, { maxAttempts: 5, delayMs: 0, slowTimeoutMs: 8000 });
   assert.equal(back.settings.fallbackProxy.enabled, true);
   assert.equal(back.settings.fallbackProxy.raw, 'http://10.0.0.3:37581');
   assert.equal(back.settings.fallbackProxy.port, 37581);

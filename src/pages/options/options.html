@@ -453,6 +453,10 @@
               <code>&lt;img&gt;</code> 的阅读器不派发可捕获的错误事件，这类图片救不到。要覆盖
               <code>fetch</code> / XHR / 预加载图，见下面的「深度重试站点」。</p>
             <p>图源返回 404 / 5xx 时<strong>不</strong>重试：换个代理拿到的还是同一个结果。</p>
+            <p><strong>慢图看门狗</strong>盯的是“慢但没失败”的请求：测速只能量出
+              「连上代理要多久」，量不出「一张图多久才下得完」；而且节点很多时串行测速
+              本身就慢。看门狗直接给真实图片请求计时，超过阈值还没 `load` 就主动换节点。
+              它只覆盖 DOM 里的 <code>&lt;img&gt;</code>，CSS 背景图 / canvas 救不回来。</p>
             <p><strong>兜底代理是一个普通的 HTTP/HTTPS 代理</strong>，填「地址:端口」就行。它独立于
               节点列表：不参与轮询、不测速、不会被自动禁用。轮询节点全试过仍然失败时，
               扩展把这个图源临时指向它，然后让页面再发一次。</p>
@@ -476,6 +480,13 @@
             <div class="field__control">
               <input type="number" id="retryDelay" min="0" max="5000" step="50">
               <span class="field__unit">毫秒</span>
+            </div>
+          </div>
+          <div class="field field--inline">
+            <label class="field__label" for="retryWatchdog">图片加载看门狗</label>
+            <div class="field__control">
+              <input type="number" id="retryWatchdog" min="0" max="60000" step="500">
+              <span class="field__unit">毫秒（0 = 关闭，默认 12000）</span>
             </div>
           </div>
           <div class="field field--inline">

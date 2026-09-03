@@ -353,6 +353,13 @@ function renderRetryKpis() {
       tone: retry.deep > 0 ? 'ok' : '',
       hint: retry.deep > 0 ? '主世界补丁问的（fetch / XHR / 预加载图）' : '',
     }),
+    kpi({
+      label: '看门狗切换',
+      value: retry.slow,
+      unit: '次',
+      tone: retry.slow > 0 ? 'ok' : '',
+      hint: retry.slow > 0 ? '超过阈值还没加载完，主动换了节点' : '',
+    }),
     kpi({ label: '兜底接管', value: fb.used, unit: '次' }),
     kpi({
       label: '兜底成功率',
@@ -645,6 +652,7 @@ function renderSettings() {
   $('rotateEvery').value = s.rotateEvery;
   $('retryAttempts').value = s.retry.maxAttempts;
   $('retryDelay').value = s.retry.delayMs;
+  $('retryWatchdog').value = s.retry.slowTimeoutMs;
   $('fallbackProxyRaw').value = s.fallbackProxy.raw;
   $('fallbackProxyUser').value = s.fallbackProxy.username;
   $('fallbackProxyPass').value = s.fallbackProxy.password;
@@ -943,6 +951,7 @@ const saveSettings = debounce(async () => {
     next.settings.rotateEvery = Number($('rotateEvery').value);
     next.settings.retry.maxAttempts = Number($('retryAttempts').value);
     next.settings.retry.delayMs = Number($('retryDelay').value);
+    next.settings.retry.slowTimeoutMs = Number($('retryWatchdog').value);
     next.settings.fallbackProxy = {
       enabled: $('fallbackProxyEnabled').checked,
       raw: $('fallbackProxyRaw').value.trim(),
@@ -1182,7 +1191,7 @@ $('btnTestRule').addEventListener('click', () => {
 });
 
 
-for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retryDelay',
+for (const id of ['strategy', 'fallback', 'rotateEvery', 'retryAttempts', 'retryDelay', 'retryWatchdog',
   'fallbackProxyRaw', 'fallbackProxyUser', 'fallbackProxyPass', 'fallbackProxyEnabled',
   'defaultProxyMode', 'defaultProxyRaw', 'defaultProxyUser', 'defaultProxyPass',
   'deepRetrySites', 'deepRetryEnabled',

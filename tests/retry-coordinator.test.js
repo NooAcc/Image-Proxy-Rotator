@@ -113,6 +113,36 @@ test('查不到失败原因时保守放弃，不盲目重刷', async () => {
   assert.equal(plan.reason, 'unknown-cause');
 });
 
+test('看门狗问的慢请求不依赖 webRequest 失败记录，直接按可重试处理', async () => {
+  // 慢请求没有「失败」：网络层可能到 20 秒后才完成，浏览器也不会派发 error。
+  // 页面侧的看门狗用 cause:'slow' 主动来问，后台不能再等失败原因然后判 unknown
+  await seed();
+  const plan = await handleMessage({
+    type: 'imageRetryAsk',
+    url: IMG_URL,
+    attempt: 1,
+    cause: 'slow',
+  });
+  assert.equal(plan.action, 'retry');
+  assert.equal(plan.delayMs, 300);
+  assert.equal((await view()).retry.attempted, 1);
+  assert.equal((await view()).retry.slow, 1, '看门狗触发的重发要能单独数出来');
+});
+
+test('慢请求用尽次数后直接切兜底，也计入看门狗', async () => {
+  await seed({ settings: { retry: { maxAttempts: 1 }, fallbackProxy: FALLBACK } });
+  const plan = await handleMessage({
+    type: 'imageRetryAsk',
+    url: IMG_URL,
+    attempt: 1,
+    cause: 'slow',
+  });
+  assert.equal(plan.action, 'fallback');
+  const m = await view();
+  assert.equal(m.fallbackProxy.used, 1);
+  assert.equal(m.retry.slow, 1, '切到兜底也是看门狗在起作用');
+});
+
 test('不匹配任何规则的图片完全不干预', async () => {
   await seed();
   const plan = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { url: 'https://cdn.other.com/x.jpg' });

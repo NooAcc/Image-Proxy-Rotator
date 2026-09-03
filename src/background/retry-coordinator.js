@@ -76,7 +76,7 @@ const GIVE_UP_TEXT = {
  *   `via` 由主世界补丁给出（决策 D31）。缺省表示来自 retry.js 的 `<img>` 那条路。
  * @returns {Promise<{action: 'retry'|'fallback'|'give-up', url?: string, delayMs?: number, reason?: string}>}
  */
-export async function planRetry({ url, attempt, via } = {}) {
+export async function planRetry({ url, attempt, via, cause } = {}) {
   // 页面来问了，就撤销「这次失败页面没捕获到」的判定 —— 无论接下来决定重不重试。
   // 放在最前面：下面每一条提前返回都同样意味着「页面确实看见了」
   if (typeof url === 'string' && url) noteRetryAsked(url);
@@ -114,14 +114,19 @@ export async function planRetry({ url, attempt, via } = {}) {
   // 有几张我们决定不重试」。
   if (!matchPacUrl(url, config.rules)) return give('not-routed');
 
-  // 原因可能还没落地 —— onErrorOccurred 与渲染进程派发 error 是两条独立路径，
-  // 没有顺序保证。等一次再查，仍然查不到就按「原因不明」处理（保守放弃）
-  let kind = observedFailure(url);
+  // 看门狗带来的 slow 问询没有对应的网络失败 —— 请求还在路上，只是太慢。
+  // 这时不能等失败原因（永远等不到），直接按可重试处理。
+  let kind = cause === 'slow' ? 'slow' : null;
   let waited = false;
   if (!kind) {
-    waited = true;
-    await sleep(LOOKUP_GRACE_MS);
+    // 原因可能还没落地 —— onErrorOccurred 与渲染进程派发 error 是两条独立路径，
+    // 没有顺序保证。等一次再查，仍然查不到就按「原因不明」处理（保守放弃）
     kind = observedFailure(url);
+    if (!kind) {
+      waited = true;
+      await sleep(LOOKUP_GRACE_MS);
+      kind = observedFailure(url);
+    }
   }
   if (!kind) kind = 'unknown';
 
@@ -156,19 +161,23 @@ export async function planRetry({ url, attempt, via } = {}) {
 
   if (plan.action === 'retry') {
     await noteRetryMetric({ kind: 'attempted', at: Date.now() });
+    if (cause === 'slow') await noteRetryMetric({ kind: 'slow', at: Date.now() });
     if (shouldSpeak(`${hostOf(url)}|retry`)) {
       log.add({
         level: 'warn',
         kind: 'request',
-        message: `${hostOf(url)} 的图片加载失败（${kind === 'proxy' ? '代理故障' : '连接失败'}），`
-          + `正在换一个节点重发（最多尝试 ${retry.maxAttempts} 个节点）。具体次数见统计页。`,
+        message: cause === 'slow'
+          ? `${hostOf(url)} 的图片加载超过阈值仍没完成，`
+            + `正在换一个节点重发（最多尝试 ${retry.maxAttempts} 个节点）。具体次数见统计页。`
+          : `${hostOf(url)} 的图片加载失败（${kind === 'proxy' ? '代理故障' : '连接失败'}），`
+            + `正在换一个节点重发（最多尝试 ${retry.maxAttempts} 个节点）。具体次数见统计页。`,
       });
     }
     queueRuntimeSave();
     return { action: 'retry', delayMs: retry.delayMs };
   }
 
-  if (plan.action === 'fallback') return dispatchFallback({ url, retry, log });
+  if (plan.action === 'fallback') return dispatchFallback({ url, retry, log, cause });
 
   // 走到这里的一定是「你的图片」（不归本扩展管的已经在上面提前返回了）。
   // 用尽了却没兜底算 exhausted，其余算 skipped —— 后者的含义是
@@ -195,7 +204,7 @@ export async function planRetry({ url, attempt, via } = {}) {
  * `exhausted` 无论切没切成都要记：它的含义是「轮询节点都试过了」，与兜底接不接手无关
  * （`exhausted >= fallbackProxy.used` 因此恒成立）。
  */
-async function dispatchFallback({ url, retry, log }) {
+async function dispatchFallback({ url, retry, log, cause }) {
   const opened = openFallbackWindow(url);
 
   if (!opened.ok) {
@@ -239,6 +248,7 @@ async function dispatchFallback({ url, retry, log }) {
 
   await noteRetryMetric({ kind: 'exhausted', at: Date.now() });
   await noteFallbackProxyMetric({ used: true, at: Date.now() });
+  if (cause === 'slow') await noteRetryMetric({ kind: 'slow', at: Date.now() });
   if (shouldSpeak(`${hostOf(url)}|fallback`)) {
     log.add({
       level: 'warn',

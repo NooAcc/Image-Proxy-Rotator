@@ -82,6 +82,7 @@
 | **D32** | 桥把页面来的消息**当不可信输入**处理，**不做 nonce** | 主世界补丁与页面脚本共享同一个 JS 环境：页面读得到补丁里的一切，任何在补丁里生成或接收的密钥页面同样读得到 —— nonce 在这里是安全剧场。真正的防线是两条：**归属由后台裁决**（`planRetry()` 一进门就 `matchPacUrl()`，不是本扩展路由出去的一律 give-up），以及**每页 500 次硬上限**（防止页面把桥当成打 SW 的放大器）。残余风险（能探测某地址是否命中规则、能刷高计数）写进了 [LIMITATIONS.md](LIMITATIONS.md) 第 20 节，且只在用户显式勾选的站点上成立 |
 | **D33** | 补丁**只重发 GET / HEAD** | 重复提交的代价不对称：漫画站的图源与列表接口几乎全是 GET，覆盖率损失极小，而一次被重发的「发评论」是用户账号上真实发生了两次的事，且事后极难归因。判断按调用点取（`init.method` / `Request.method` / `open()` 的第一个参数），`Image` 天然是 GET。<br>1.4.x 还额外禁止 `fetch` / `XHR` 走兜底 —— 那条限制随 D23 一起消失了：旧兜底按 `?url=` 取图，把一个 JSON 接口套进去毫无意义；新兜底是传输层换代理，对接口和图片一样有效，于是三条路（`fetch` / `XHR` / `Image`）在兜底面前一视同仁 |
 | **D35** | 「规则之外的流量」是一项**显式设置**（`settings.defaultProxy`），默认直连；PAC 的无命中分支返回它而不是硬 `DIRECT` | `chrome.proxy.settings.set()` 替换的是浏览器**整份**代理配置，包括「使用系统代理设置」。所以 PAC 里那句「没命中就 `return 'DIRECT'`」不是一个无关紧要的默认值 —— 它替用户撤掉了他原来的上网通路。对靠本机代理客户端上网的人，症状是**图片站一切正常、其余网站全部 `ERR_CONNECTION_TIMED_OUT`**，而扩展一个错都不报（它确实按规则做了该做的事）。这又是一次「装上之后看起来正常，实际上坏了别的东西」，同 D10、D13、D16。<br>**为什么必须由用户填。** Chrome 对 `mode: 'system'` 只回一个 `'system'` 字符串，**不给服务器地址**（刻意的隐私设计），没有任何扩展 API 读得到系统代理指向哪里 —— 自动继承这条路根本不存在。<br>**默认仍是直连**，因为改默认等于给每个老用户凭空插一个代理出口；不用代理客户端的人本来就该直连。代价是这个坑对新用户仍存在一次，所以补了第二道：从「未接管」变成「接管」的那一刻读一次原有 `mode`（**只有这一个瞬间读得到**，之后 `get()` 永远回 `pac_script`），原来不是 `direct` 而又没配默认代理时写一条 warn 日志说出会看到什么现象，状态页也单列一行「规则之外的流量」。<br>**绕过列表与私有网段仍然硬直连**，排在默认代理之前：把 `127.0.0.1` / `192.168.*` 送进代理是纯粹的错误，这也保证了用户自己的代理客户端与节点主机始终可达。兜底代理（D23）是另一件事 —— 它只在一张图用尽重试后对该源短暂开窗，两者只共用地址语法与 token 格式化。见 [LIMITATIONS.md](LIMITATIONS.md) 第 6.1 节 |
+| **D36** | 慢图看门狗：内容脚本捕获 `<img>` 的 `loadstart`，真实请求超过 `retry.slowTimeoutMs`（默认 12 秒）仍无结果时以 `cause:'slow'` 问后台并换节点 | 代理“慢但活着”不会派发 error，失败驱动重试（D20）整条链都碰不到它；测速只能量“连上代理要多久”，量不出“一张图多久才下得完”，而且节点多时串行测速本身就很慢。所以看门狗直接量真实图片请求的墙钟时间，并沿用后台同一套规则/次数/兜底判定（D21）。它只覆盖 DOM `<img>` —— 游离 `new Image()`、fetch/XHR 仍由深度重试（D31）覆盖；CSS 背景图与 canvas 依旧无解。**自己换节点会中止旧请求，旧请求的 abort/error 必须压到新请求的 `loadstart` 之后**，否则一次切换会被错记成一次失败。统计里单独记 `retry.slow`，与失败驱动的 `attempted` 正交 |
 
 ---
 
@@ -223,6 +224,7 @@ Settings {
   retry: {
     maxAttempts: number,           // 每张图最多尝试几个节点，**含首次**。1 = 不重试
     delayMs: number,               // 重发前等多久（给坏代理列表留登记时间）
+    slowTimeoutMs: number,         // 图片加载看门狗（0=关闭，默认 12000ms；决策 D36）
   },
   fallbackProxy: {                 // 兜底代理（独立于节点列表，决策 D23）
     enabled: boolean,              // 地址不可用时规范化会强制置 false
@@ -296,6 +298,7 @@ Metrics {
 
     // 这一个根本不在上面的账里 —— 它连「被问过」都没发生
     unseen,      // 网络层失败了，但页面侧压根没捕获到（决策 D28）
+    slow,        // 看门狗触发后真的换了节点/兜底代理的次数（决策 D36）
   },
   // 开窗放行时记 used；冷却期内本该兜底却没兜的记 cooldown（两者不重叠）
   fallbackProxy: { used, ok, fail, cooldown },
@@ -369,7 +372,7 @@ Metrics {
 | `background/auth-provider.js` | 代理认证自动应答 |
 | `background/messaging.js` | UI / 内容脚本与后台之间唯一的契约 |
 | `background/service-worker.js` | 事件注册与启动流程 |
-| `content/retry.js` | 页面侧执行端：捕获 `<img>` 的 error、问后台、重新赋值 `src`、回报结果。**classic script，不能有 import**（MV3 的 content_scripts 不支持 ESM） |
+| `content/retry.js` | 页面侧执行端：捕获 `<img>` 的加载生命周期，为超时未完成的图启动看门狗（决策 D36）、捕获 error、问后台、重新赋值 `src`、回报结果。**classic script，不能有 import**（MV3 的 content_scripts 不支持 ESM） |
 | `content/deep-bridge.js` | 隔离世界的桥：把主世界的消息转给后台。唯一持有 `chrome.runtime` 的一侧，也是信任边界（决策 D32）。**classic script** |
 | `content/deep-patch.js` | **主世界**补丁：包住页面的 `fetch` / `XMLHttpRequest` / `Image`，失败时隔着桥问后台再重发。只重发 GET/HEAD（决策 D33）。**classic script** |
 
@@ -382,7 +385,7 @@ Metrics {
 ## 测试策略
 
 ```bash
-npm test    # 699 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
+npm test    # 710 个测试（单元 + 集成 + 后台编排 + SW 冒烟 + 打包 + UI 契约）
 npm run check
 ```
 

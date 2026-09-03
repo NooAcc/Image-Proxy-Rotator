@@ -299,6 +299,12 @@ function renderMetrics(box) {
         unit: '次',
         tone: retry.exhausted > 0 ? 'err' : '',
       }),
+      kpi({
+        label: '看门狗',
+        value: retry.slow,
+        unit: '次',
+        tone: retry.slow > 0 ? 'ok' : '',
+      }),
       // 不为零说明这个站点的图不是 DOM 里的 <img>，重试机制整体碰不到它们。
       // 弹窗放不下解释，但这个数字本身就足以让人去设置页看详情
       kpi({

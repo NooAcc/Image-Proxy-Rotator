@@ -65,8 +65,8 @@ const ABORTED_ERRORS = new Set([
   'ERR_BLOCKED_BY_RESPONSE',
 ]);
 
-/** 可以重试的失败类别 */
-const RETRIABLE = new Set(['proxy', 'network']);
+/** 可以重试的类别。slow 不是 classifyFailure 的产物，而是看门狗直接传入的“慢”原因。 */
+const RETRIABLE = new Set(['proxy', 'network', 'slow']);
 
 /** 去掉 `net::` 前缀，拿到裸的错误码 */
 function bareCode(error) {

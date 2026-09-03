@@ -43,7 +43,9 @@ test('emptyMetrics 每次都是新对象，字段齐全且全为零', () => {
   assert.deepEqual(a.latency, new Array(LATENCY_BUCKETS_MS.length + 1).fill(0));
   assert.deepEqual(a.perNode, {});
   assert.deepEqual(a.perRule, {});
-  assert.deepEqual(a.retry, { attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0 });
+  assert.deepEqual(a.retry, {
+    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0, slow: 0,
+  });
   assert.deepEqual(a.fallbackProxy, { used: 0, ok: 0, fail: 0, cooldown: 0 });
   assert.deepEqual(a.retired, { nodeUsed: 0, nodeOk: 0, nodeFail: 0, ruleHits: 0 });
   assert.deepEqual(a.probe, { ok: 0, fail: 0, lastAt: null });
@@ -313,7 +315,7 @@ test('normalizeMetrics 之后立刻能继续计数', () => {
 
 // ---------------------------------------------------------------- 重试与兜底
 
-test('noteRetry 七个口径互不重叠', () => {
+test('noteRetry 新增 slow 口径，并与 attempted 正交', () => {
   const m = emptyMetrics();
   noteRetry(m, { kind: 'attempted', at: 1000 });
   noteRetry(m, { kind: 'attempted' });
@@ -325,9 +327,11 @@ test('noteRetry 七个口径互不重叠', () => {
   // deep 与上面六个是**正交**的：它数「这次是主世界补丁问的」，
   // 同一次判定既会 +1 attempted 也会 +1 deep，不该和其余口径一起对账
   noteRetry(m, { kind: 'deep' });
+  // slow 同样是正交口径：一次看门狗触发的重发既 +1 attempted，也 +1 slow
+  noteRetry(m, { kind: 'slow' });
 
   assert.deepEqual(m.retry, {
-    attempted: 2, recovered: 1, exhausted: 1, skipped: 1, abandoned: 1, unseen: 1, deep: 1,
+    attempted: 2, recovered: 1, exhausted: 1, skipped: 1, abandoned: 1, unseen: 1, deep: 1, slow: 1,
   });
   assert.equal(m.since, 1000, '第一次重试判定也该点亮 since');
 });
@@ -339,7 +343,7 @@ test('noteRetry 对未知口径与脏输入无动于衷，不会凭空长出字�
   }
   noteRetry(m);
   assert.deepEqual(m.retry, {
-    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0,
+    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0, slow: 0,
   });
 });
 
@@ -364,11 +368,11 @@ test('兜底的 ok 缺省是 null，不会被当成 false 记成失败', () => {
 
 test('normalizeMetrics 读回新计数器，缺字段补零、脏值归零', () => {
   const m = normalizeMetrics({
-    retry: { attempted: 7, recovered: '3', exhausted: -1, skipped: NaN },
+    retry: { attempted: 7, recovered: '3', exhausted: -1, skipped: NaN, slow: 4 },
     fallbackProxy: { used: 2.6, ok: 1 },
   });
   assert.deepEqual(m.retry, {
-    attempted: 7, recovered: 3, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0,
+    attempted: 7, recovered: 3, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0, slow: 4,
   });
   assert.deepEqual(m.fallbackProxy, { used: 3, ok: 1, fail: 0, cooldown: 0 });
 });
@@ -377,7 +381,7 @@ test('旧版存储里没有这两个桶时读回全零，而不是 undefined', (
   // 用户从旧版本升上来时存储里只有 requests / perNode，读回来必须是能直接继续累加的形状
   const m = normalizeMetrics({ requests: { total: 5, ok: 5 } });
   assert.deepEqual(m.retry, {
-    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0,
+    attempted: 0, recovered: 0, exhausted: 0, skipped: 0, abandoned: 0, unseen: 0, deep: 0, slow: 0,
   });
   assert.deepEqual(m.fallbackProxy, { used: 0, ok: 0, fail: 0, cooldown: 0 });
 });
@@ -550,7 +554,17 @@ test('summarizeMetrics 暴露 abandoned 与 unseen，并把悬空的算清楚', 
   const view = summarizeMetrics(m);
   assert.equal(view.retry.abandoned, 1);
   assert.equal(view.retry.unseen, 3);
+  assert.equal(view.retry.slow, 0);
   assert.equal(view.retry.pending, 0, 'attempted 全部有了结论，不该有悬空');
+});
+
+test('summarizeMetrics 暴露看门狗切换次数', () => {
+  const m = emptyMetrics();
+  noteRetry(m, { kind: 'attempted' });
+  noteRetry(m, { kind: 'slow' });
+  const view = summarizeMetrics(m);
+  assert.equal(view.retry.slow, 1);
+  assert.equal(view.retry.attempted, 1);
 });
 
 test('重发了却还没有结论的次数单独可见', () => {

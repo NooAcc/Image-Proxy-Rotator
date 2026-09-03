@@ -100,6 +100,13 @@ export function emptyMetrics() {
        * 时它恒为 0，而 `retry.unseen` 会继续涨 —— 两个数字放在一起才能指认那种失败。
        */
       deep: 0,
+      /**
+       * 看门狗触发后真的换了节点/兜底代理的次数。
+       *
+       * 与 `attempted` 正交：一次看门狗重发既 +1 attempted 也 +1 slow。单独数出来，
+       * 是为了回答「慢图看门狗到底在不在干活」—— 它不依赖测速，也不依赖网络层报错。
+       */
+      slow: 0,
     },
     /**
      * 兜底代理：轮询节点全试过之后接手了多少次，以及它自己的成败。
@@ -290,7 +297,7 @@ export function noteRequest(metrics, {
  *     13 次失败有 3 次属于此类，而旧面板「未重试」显示 0 —— 读起来像「每次失败都重试了」。
  *
  * @param {object} metrics 就地修改
- * @param {{kind: 'attempted'|'recovered'|'exhausted'|'skipped'|'abandoned'|'unseen', at?: number}} event
+ * @param {{kind: 'attempted'|'recovered'|'exhausted'|'skipped'|'abandoned'|'unseen'|'deep'|'slow', at?: number}} event
  */
 export function noteRetry(metrics, { kind, at } = {}) {
   touch(metrics, at);
@@ -562,6 +569,9 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       // 其中有多少次是主世界补丁问的。它与 unseen 是一对：补丁在干活时 unseen 会明显
       // 下降，而 deep 恒为 0、unseen 照旧居高不下就说明补丁根本没装上
       deep: m.retry.deep,
+      // 其中有多少次是看门狗主动换的节点。这个数字与测速无关，
+      // 只由「一张图超过阈值还在加载」驱动
+      slow: m.retry.slow,
       // 重发了却还没有结论的次数。不为零本身是有用的信号：要么还在路上，要么页面
       // 在重发之后被换掉了而「结果未知」的超时还没到。上一版没有这一格，于是
       // 「重发 7 次、救回 6 次」里那 1 次差额在面板上完全找不到

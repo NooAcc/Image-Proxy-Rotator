@@ -9,7 +9,7 @@
 import {
   CONFIG_VERSION, KNOWN_PROTOCOLS, PROTOCOL_ALIASES, RULE_TYPES,
   STRATEGIES, FALLBACKS, DEFAULT_PROBE_URL, DEFAULT_BYPASS_LIST,
-  RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS,
+  RETRY_ATTEMPTS_CAP, RETRY_DELAY_CAP_MS, RETRY_SLOW_TIMEOUT_CAP_MS,
   defaultConfig, defaultSettings, defaultProbeSettings,
   defaultRetrySettings, defaultFallbackProxy, defaultDefaultProxy, defaultDeepRetry,
   defaultEasyProxiesSettings,
@@ -173,6 +173,7 @@ export function normalizeRetrySettings(raw) {
   return {
     maxAttempts: clampInt(raw.maxAttempts, 1, RETRY_ATTEMPTS_CAP, base.maxAttempts),
     delayMs: clampInt(raw.delayMs, 0, RETRY_DELAY_CAP_MS, base.delayMs),
+    slowTimeoutMs: clampInt(raw.slowTimeoutMs, 0, RETRY_SLOW_TIMEOUT_CAP_MS, base.slowTimeoutMs),
   };
 }
 

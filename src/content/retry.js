@@ -44,6 +44,12 @@
    * 否则会把「只是很慢」误判成「没有结论」。
    */
   const RETRY_OUTCOME_TIMEOUT_MS = 25000;
+  /** 看门狗阈值缺省时的默认值（12 秒）。 */
+  const WATCHDOG_DEFAULT_MS = 12000;
+  /** 看门狗阈值上限：再高就不是“慢”，是配置写坏了。 */
+  const WATCHDOG_MAX_MS = 60000;
+  /** chrome.storage.local 中配置的键名。内容脚本没法 import，只能自己重复一份。 */
+  const CONFIG_KEY = 'config';
 
   /** 原图 URL -> 已经尝试过几次（含首次） */
   const attempts = new Map();
@@ -60,11 +66,24 @@
   const outstanding = new Set();
   /** 已经问过一次、正在等回复的元素，防止同一张图并发重入 */
   const asking = new WeakSet();
+  /** img -> { url, state, timer }。看门狗只盯“开始加载了、但还没有结果”的图。 */
+  const pendingLoads = new WeakMap();
+  /** 我们主动换节点时会中止旧请求；旧请求的 abort/error 不该再算一次失败。 */
+  const suppressAbort = new WeakSet();
 
   let spent = 0;
   let inflight = 0;
   let budgetReported = false;
   let disabledUntil = 0;
+  let watchdogMs = WATCHDOG_DEFAULT_MS;
+
+  /** 把存储里读到的阈值夹成合法值；缺失/损坏时回到默认 */
+  function normalizeWatchdogMs(value) {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n)) return WATCHDOG_DEFAULT_MS;
+    if (n <= 0) return 0;
+    return Math.min(n, WATCHDOG_MAX_MS);
+  }
 
   // ---------------------------------------------------------------- 与后台通信
 
@@ -147,11 +166,20 @@
       void chrome.runtime.lastError;
       debugOn = !!(got && got[DEBUG_KEY] && got[DEBUG_KEY].enabled === true);
     });
+    chrome.storage.local.get(CONFIG_KEY, (got) => {
+      void chrome.runtime.lastError;
+      watchdogMs = normalizeWatchdogMs(got?.[CONFIG_KEY]?.settings?.retry?.slowTimeoutMs);
+    });
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area !== 'local' || !changes || !changes[DEBUG_KEY]) return;
-      const next = changes[DEBUG_KEY].newValue;
-      debugOn = !!(next && next.enabled === true);
-      if (!debugOn) debugQueue = [];
+      if (area !== 'local' || !changes) return;
+      if (changes[DEBUG_KEY]) {
+        const next = changes[DEBUG_KEY].newValue;
+        debugOn = !!(next && next.enabled === true);
+        if (!debugOn) debugQueue = [];
+      }
+      if (changes[CONFIG_KEY]) {
+        watchdogMs = normalizeWatchdogMs(changes[CONFIG_KEY].newValue?.settings?.retry?.slowTimeoutMs);
+      }
     });
   } catch {
     // storage 不可用（上下文失效、权限被裁剪）时就当开关是关的
@@ -200,6 +228,33 @@
     else img.src = url;
   }
 
+  /** 清掉这张图上的看门狗状态（图片已经 load/error/abort，或我们即将重开一轮）。 */
+  function clearPendingLoad(img) {
+    const rec = pendingLoads.get(img);
+    if (!rec) return;
+    if (rec.timer) clearTimeout(rec.timer);
+    pendingLoads.delete(img);
+  }
+
+  /** 只看门狗这一路清定时器，保留 rec 本体 —— give-up 时原请求还要继续等。 */
+  function stopWatchdog(rec) {
+    if (rec.timer) {
+      clearTimeout(rec.timer);
+      rec.timer = 0;
+    }
+  }
+
+  /** 给“正在加载”的 img 挂上看门狗定时器。 */
+  function armWatchdog(img, url, state) {
+    clearPendingLoad(img);
+    if (watchdogMs <= 0) return;
+    const rec = { url, state: state ?? null, timer: 0 };
+    pendingLoads.set(img, rec);
+    rec.timer = setTimeout(() => {
+      void onWatchdogTimeout(img, rec);
+    }, watchdogMs);
+  }
+
   function watch(img, mode, url) {
     const state = { img, mode, url, timer: 0 };
     // 超时是这条链路唯一的兜底：load 与 error 都不来的时候，只有它能给出结论
@@ -207,6 +262,8 @@
     watching.set(img, state);
     outstanding.add(state);
     img.addEventListener('load', onLoaded, { once: true });
+    // 重发同样可能撞上一个慢节点 —— 从这一轮开始计时，超时后再换一个
+    armWatchdog(img, url, state);
   }
 
   /**
@@ -236,6 +293,117 @@
     if (state) settle(state, true);
   }
 
+  // ---------------------------------------------------------------- 慢图看门狗
+
+  function onLoadStart(event) {
+    const img = event.target;
+    if (!img || img.tagName !== 'IMG') return;
+    suppressAbort.delete(img);
+    const url = currentUrl(img);
+    if (!url) return;
+    // 如果这一轮是我们发起的重发，watching 里已有 state；把 state 带上看门狗，
+    // 下次再超时就能把上一轮正确结算成 abandoned
+    armWatchdog(img, url, watching.get(img) ?? null);
+  }
+
+  function onLoadFinished(event) {
+    const img = event.target;
+    if (!img || img.tagName !== 'IMG') return;
+    // 我们自己换节点时旧请求的 abort 会先到；不能让它把新请求的看门狗计时一起清掉。
+    // 新请求的 loadstart 到达后 suppressAbort 会被移除，届时 load/abort 照常处理。
+    if (event.type === 'abort' && suppressAbort.has(img)) return;
+    suppressAbort.delete(img);
+    clearPendingLoad(img);
+  }
+
+  /**
+   * 看门狗到点：这张图还在加载（既没有 load 也没有 error）。
+   *
+   * 与失败重试不同，这里没有网络层错误码可查 —— 请求可能最终会成功，只是太慢。
+   * 页面侧只负责把 cause:'slow' 带给后台，由后台按规则/次数/兜底决定下一步。
+   */
+  async function onWatchdogTimeout(img, rec) {
+    if (pendingLoads.get(img) !== rec) return;
+    if (Date.now() < disabledUntil) return;
+    if (!img.isConnected) {
+      clearPendingLoad(img);
+      return;
+    }
+    if (asking.has(img)) return;
+
+    const url = rec.url;
+    if (!url) return;
+    if (spent >= PAGE_BUDGET) {
+      if (!budgetReported) {
+        budgetReported = true;
+        dbg('budget-exhausted', { spent, cap: PAGE_BUDGET });
+        report(url, 'budget', false);
+      }
+      return;
+    }
+    if (inflight >= MAX_INFLIGHT) {
+      dbg('inflight-cap', { url, inflight });
+      return;
+    }
+
+    const attempt = (attempts.get(url) ?? 0) + 1;
+    asking.add(img);
+    inflight++;
+    dbg('slow-timeout', { url, attempt, timeoutMs: watchdogMs });
+    try {
+      const plan = await send({ type: 'imageRetryAsk', url, attempt, cause: 'slow' });
+      if (!plan || !plan.ok) {
+        dbg('no-plan', { url, attempt });
+        return;
+      }
+      if (plan.reason === 'disabled') {
+        disabledUntil = Date.now() + DISABLED_COOLDOWN_MS;
+        dbg('cooldown', { untilMs: DISABLED_COOLDOWN_MS });
+        return;
+      }
+      if (plan.action !== 'retry' && plan.action !== 'fallback') {
+        // 不给页面新地址，也不清 pending：原请求还挂在网上，让它自己等 load/error
+        dbg('slow-gave-up', { url, attempt, reason: plan.reason ?? null });
+        stopWatchdog(rec);
+        return;
+      }
+
+      // 后台回复的这几毫秒里图片可能已经加载完了；加载完成事件会清掉 rec
+      if (pendingLoads.get(img) !== rec) return;
+
+      if (attempts.size > MAX_TRACKED) attempts.clear();
+      attempts.set(url, attempt);
+      spent++;
+
+      // 上一轮是我们发起的：它还没出结果就被看门狗判了“太慢”，结算成结果未知
+      if (rec.state) settle(rec.state, null);
+      stopWatchdog(rec);
+
+      const delay = Number(plan.delayMs);
+      if (Number.isFinite(delay) && delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+      // 等待期间图片可能已被页面换掉或移除，这时重发没有意义
+      if (!img.isConnected || pendingLoads.get(img) !== rec) {
+        dbg('detached', { url, attempt });
+        return;
+      }
+
+      // 换节点会中止还在网上的旧请求；它派发的 abort/error 是我们造成的，
+      // 在下一个 loadstart 之前要压住，否则会把“旧请求被中止”误判成“新节点失败”
+      suppressAbort.add(img);
+      clearPendingLoad(img);
+      const mode = plan.action === 'fallback' ? 'fallback' : 'retry';
+      watch(img, mode, url);
+      reload(img, url);
+      dbg(plan.action === 'fallback' ? 'fallback-sent' : 'resent',
+        { url, attempt, waitedMs: Number.isFinite(delay) ? delay : 0, slow: true });
+    } finally {
+      inflight--;
+      asking.delete(img);
+    }
+  }
+
   // ---------------------------------------------------------------- 失败入口
 
   function currentUrl(img) {
@@ -246,6 +414,9 @@
   async function onResourceError(event) {
     const img = event.target;
     if (!img || img.tagName !== 'IMG') return;
+    // 重新赋值 src 会中止旧请求，那个 error 是我们自己造成的，不是节点失败
+    if (suppressAbort.has(img)) return;
+    if (!asking.has(img)) clearPendingLoad(img);
 
     // 上一轮是我们发起的：先把结果如实回报，再决定要不要继续
     const previous = watching.get(img);
@@ -330,6 +501,9 @@
   }
 
   // 资源加载失败的 error 事件不冒泡，但会经过捕获阶段 —— 所以只能在这里挂，
-  // 且必须用 capture=true
+  // 且必须用 capture=true。loadstart / load / abort 同理，全走捕获阶段。
+  document.addEventListener('loadstart', onLoadStart, true);
+  document.addEventListener('load', onLoadFinished, true);
+  document.addEventListener('abort', onLoadFinished, true);
   document.addEventListener('error', onResourceError, true);
 })();

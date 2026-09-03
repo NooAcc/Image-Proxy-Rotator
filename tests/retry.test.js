@@ -40,6 +40,12 @@ test('代理层错误码归为 proxy，且可重试', () => {
   }
 });
 
+test('看门狗带来的 slow 原因被视为可重试 —— 它是主动放弃慢请求，不是网络失败', () => {
+  assert.equal(isRetriableKind('slow'), true);
+  assert.equal(decideRetry({ ...base, kind: 'slow', attempt: 1 }).action, 'retry');
+  assert.equal(decideRetry({ ...base, kind: 'slow', attempt: 3 }).action, 'fallback');
+});
+
 test('连接层错误码归为 network，走代理时这些多半是代理侧的问题，可重试', () => {
   for (const error of [
     'net::ERR_CONNECTION_RESET',
