@@ -73,12 +73,31 @@ CLI：
 
 启动时打印映射表与扩展导入行；`--print-nodes` 只打印导入行。
 
+### `tools/label-proxy/lib/service.mjs`（扩展联动）
+
+配置含 `service` 时，CLI 额外监听一个仅绑定 `127.0.0.1` 的 HTTP 端口：
+
+- `POST /api/convert`：接收 `{ upstreams: [{ name, host, port }] }`，按
+  `buildPlan` 分配标签并启动/替换中继，返回 `{ ok, nodes: [...] }`。
+- `GET /api/status`：返回服务状态与当前标签数。
+- 可选 `service.token`，校验 `Authorization: Bearer <token>`。
+
+扩展侧（`src/background/easy-proxies-sync.js`）：
+
+- `settings.easyProxies.labelServiceUrl` 非空时，easy_proxies 拉取与选优完成后，
+  先 `POST /api/convert`，再把返回节点经 `toLabelProxyNodes()` 转成带
+  `meta.easyProxies` 标记的扩展节点，替换旧自动节点并重新注入 PAC。
+- 服务失败时同步报错，**不清空现有节点**；easy_proxies 返回空列表时不调用转换。
+- 设置页提供服务地址与服务口令两个字段；未填写时保持原「原始地址写回」行为。
+
 ## 测试
 
 - config：默认地址分配、非法端口/空列表报错、导入行格式。
 - relay：用真实回环地址开两个本地 listener，两个不同内容的上游服务器，
   分别连接 `127.0.0.2/3` 断言收到各自上游内容。
 - CLI 由 relay/config 的测试覆盖核心；手动跑 `--print-nodes` 验证。
+- service：真实 `POST /api/convert` 返回标签并转发到对应上游；token 与非法输入。
+- e2e：真实 HTTP 服务 + easy_proxies 同步 stub 走完整“拉取→转换→写回→可用”链路。
 
 ## 文档
 
@@ -88,3 +107,4 @@ CLI：
 - 扩展导入行生成方式；
 - 关闭 Easy Proxies 自动同步的提醒；
 - 「不改真实出口 IP」的边界。
+- 扩展自动联动（Easy Proxies 设置里填本地标签服务地址）。
