@@ -13,6 +13,7 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "check": "node tools/check-manifest.mjs",
+    "label-proxy": "node tools/label-proxy/cli.mjs --service",
     "icons": "node tools/make-icons.mjs",
     "pack": "node tools/pack.mjs",
     "verify": "npm test && npm run check",

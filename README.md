@@ -200,7 +200,8 @@ git clone https://github.com/NooAcc/Image-Proxy-Rotator.git
 - 填了密码会先 `POST /api/auth` 登录再拉取；同步失败的原因会显示在设置页，
   并写入活动日志。
 - **可选联动：同 IP 多端口想按端口记账时**，在设置里额外填「本地标签服务地址」
-  （例如 `http://127.0.0.1:19191`，见 [`tools/label-proxy`](tools/label-proxy/README.md)）。
+  （例如 `http://127.0.0.1:19191`，见 [`tools/label-proxy`](tools/label-proxy/README.md)；
+  最简单的启动方式是项目根目录执行 `npm run label-proxy`，无需配置文件）。
   之后每次同步会先把 easy_proxies 节点交给本地工具转换成唯一的 `127.0.0.x` 标签，
   再自动写回扩展并重新注入 PAC；统计面板因此能精确区分每个端口。工具未启动时同步
   会明确报错且不清空现有节点。

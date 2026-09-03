@@ -20,6 +20,7 @@ export function parseArgv(argv) {
   const args = Array.isArray(argv) ? argv : [];
   let configPath = 'config.json';
   let printNodes = false;
+  let service = false;
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
@@ -34,12 +35,16 @@ export function parseArgv(argv) {
       configPath = arg.slice('--config='.length);
     } else if (arg === '--print-nodes') {
       printNodes = true;
+    } else if (arg === '--service') {
+      service = true;
     } else {
       throw new Error(`未知参数：${arg}`);
     }
   }
 
-  return { configPath, printNodes };
+  const options = { configPath, printNodes };
+  if (service) options.service = true;
+  return options;
 }
 
 function usage() {
@@ -51,6 +56,7 @@ function usage() {
 选项：
   --config <path>    配置文件路径（默认 config.json）
   --print-nodes      只打印扩展导入行，不启动服务
+  --service          以默认参数启动 HTTP 服务（无需配置文件）
   --help, -h         显示本帮助
 
 示例配置见 tools/label-proxy/config.example.json。`;
@@ -91,6 +97,29 @@ async function main() {
 
   if (options.help) {
     console.log(usage());
+    return;
+  }
+
+  if (options.service) {
+    try {
+      const service = await startLabelService({
+        local: { baseAddress: '127.0.0.2', port: 8080 },
+        service: { host: '127.0.0.1', port: 19191, token: '' },
+        log: (line) => console.log(line),
+      });
+      console.log(`\n本地标签 HTTP 服务已启动：http://127.0.0.1:${service.port}`);
+      console.log('扩展设置页「本地标签服务地址」填上面这行地址即可。');
+      console.log('按 Ctrl+C 停止。');
+      const stop = async () => {
+        await service.close();
+        process.exit(0);
+      };
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+    }
     return;
   }
 

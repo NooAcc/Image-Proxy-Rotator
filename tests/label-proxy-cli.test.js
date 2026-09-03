@@ -24,6 +24,14 @@ test('parseArgv 支持 --print-nodes 与 --config', () => {
   );
 });
 
+test('parseArgv 支持 --service 进入默认服务模式', () => {
+  assert.deepEqual(parseArgv(['--service']), {
+    configPath: 'config.json',
+    printNodes: false,
+    service: true,
+  });
+});
+
 test('parseArgv 拒绝未知参数', () => {
   assert.throws(() => parseArgv(['--bogus']), /未知参数/);
 });
