@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  normalizeSite, deepRetryPatterns, deepRetryActive, DEEP_RETRY_SITE_CAP,
+  normalizeSite, deepRetryPatterns, deepRetryActive, unseenAdvice, DEEP_RETRY_SITE_CAP,
 } from '../src/lib/deep-retry.js';
 
 // ---------------------------------------------------------------- 裸域名
@@ -145,4 +145,35 @@ test('开关开着且有可用模式才算生效', () => {
 test('缺字段不抛异常', () => {
   assert.equal(deepRetryActive(undefined), false);
   assert.equal(deepRetryActive({}), false);
+});
+
+// ---------------------------------------------------------------- 页面没捕获的提示
+
+test('未配置深度重试时，提示去添加站点', () => {
+  const advice = unseenAdvice(
+    { unseen: 3, deep: 0 },
+    { deepRetry: { enabled: false, sites: [] } },
+  );
+  assert.equal(advice.kind, 'add');
+  assert.match(advice.text, /添加/);
+});
+
+test('深度重试已配置但零介入时，不再叫人重复添加，而是提示确认补丁', () => {
+  const advice = unseenAdvice(
+    { unseen: 3, deep: 0 },
+    { deepRetry: { enabled: true, sites: ['nhentai.net'] } },
+  );
+  assert.equal(advice.kind, 'not-seen');
+  assert.match(advice.text, /刷新/);
+  assert.doesNotMatch(advice.text, /添加/);
+});
+
+test('深度重试有介入时，说明剩下的是补丁也够不到的类型', () => {
+  const advice = unseenAdvice(
+    { unseen: 3, deep: 2 },
+    { deepRetry: { enabled: true, sites: ['nhentai.net'] } },
+  );
+  assert.equal(advice.kind, 'covered');
+  assert.match(advice.text, /2/);
+  assert.match(advice.text, /CSS/);
 });

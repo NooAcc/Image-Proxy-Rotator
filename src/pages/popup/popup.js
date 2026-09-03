@@ -243,6 +243,7 @@ function renderMetrics(box) {
         unit: '次',
         tone: req.total > 0 && req.routed === 0 ? 'err' : 'ok',
       }),
+      kpi({ label: '取消', value: req.aborted, unit: '次' }),
       kpi({
         label: '成功率',
         value: req.successRate,
@@ -294,7 +295,7 @@ function renderMetrics(box) {
         tone: retry.attempted > 0 && retry.recovered === 0 ? 'warn' : 'ok',
       }),
       kpi({
-        label: '用尽仍失败',
+        label: '节点用尽',
         value: retry.exhausted,
         unit: '次',
         tone: retry.exhausted > 0 ? 'err' : '',

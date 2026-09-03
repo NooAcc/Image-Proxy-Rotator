@@ -429,6 +429,39 @@ test('等待期间图片已被移出文档时不再重发', async () => {
   assert.equal(el.srcWrites.length, 0, '页面都换掉了，重发只是白发一个请求');
 });
 
+test('等待重发期间图片被移出文档时，把这次没发出去的重发回报成结果未知', async () => {
+  const page = mount(() => ({ ok: true, action: 'retry', delayMs: 1 }));
+  const el = img(IMG_URL);
+  const done = page.fail(el);
+  el.isConnected = false;
+  await done;
+
+  assert.equal(el.srcWrites.length, 0);
+  assert.deepEqual(plain(page.results().at(-1)), {
+    type: 'imageRetryResult',
+    url: IMG_URL,
+    kind: 'retry',
+    ok: null,
+  }, '后台已经把这次判定记成 attempted，页面不重发就必须给一个结局，否则永久悬空');
+});
+
+test('看门狗判定重发后元素在延时中被移除，同样回报结果未知', async () => {
+  const page = mount(() => ({ ok: true, action: 'retry', delayMs: 1000 }), { watchdogMs: 1000 });
+  const el = img(IMG_URL);
+  page.start(el);
+  await page.tick(1001);
+  el.isConnected = false;
+  await page.tick(1001);
+
+  assert.equal(el.srcWrites.length, 0);
+  assert.deepEqual(plain(page.results().at(-1)), {
+    type: 'imageRetryResult',
+    url: IMG_URL,
+    kind: 'retry',
+    ok: null,
+  });
+});
+
 // ---------------------------------------------------------------- 兜底
 
 test('回 fallback 就原地重发 —— 兜底是传输层的，页面这侧不改地址', async () => {

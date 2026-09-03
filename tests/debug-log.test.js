@@ -174,6 +174,15 @@ test('format 的取值规则：null 写 -、对象走 JSON、带空格的字符�
   assert.match(line, /name="我 的 节点"/);
 });
 
+test('超过列宽的事件名与首字段之间保留分隔符', () => {
+  const dbg = make();
+  dbg.enable(true);
+  dbg.push('retry', 'fallback-window-opened', { origin: 'https://cdn.manga.com/' });
+  const line = dbg.format('retry', META).trim().split('\n').pop();
+  assert.match(line, /fallback-window-opened\s+origin=/);
+  assert.doesNotMatch(line, /openedorigin=/, '事件名和字段粘连会让导出日志无法解析');
+});
+
 test('format 对空命名空间返回空串 —— 不生成 0 行的文件', () => {
   const dbg = make();
   dbg.enable(true);

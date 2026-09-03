@@ -372,6 +372,7 @@ export function installRequestLogger() {
       // 那一格的含义是「拿到了响应却认不出是哪个节点」，压根没建起连接不算归因失败
       await noteRequestMetric({
         ok: false,
+        aborted: failureKind === 'aborted',
         nodeId: null,
         ruleId: verdict.rule.id,
         blind: verdict.blind,
@@ -380,12 +381,15 @@ export function installRequestLogger() {
       });
 
       const log = await getLogger();
+      const aborted = failureKind === 'aborted';
       log.add({
-        level: 'error',
+        level: aborted ? 'info' : 'error',
         kind: 'request',
         ok: false,
         url: details.url,
-        message: `请求失败：${details.error} ${shorten(details.url)}`,
+        message: aborted
+          ? `请求已中止：${details.error} ${shorten(details.url)}`
+          : `请求失败：${details.error} ${shorten(details.url)}`,
       });
       queueRuntimeSave();
     } catch {
@@ -404,5 +408,3 @@ async function noteEgressIp(nodeId, ip) {
     return config;
   });
 }
-
-

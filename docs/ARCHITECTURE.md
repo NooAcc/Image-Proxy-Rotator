@@ -273,7 +273,7 @@ Settings {
 Metrics {
   since: ?number,              // 首次计数的时刻，面板显示「自 X 起累计」
   requests: {                  // 只统计命中了用户规则、且**真的走了网络**的请求
-    total, ok, fail,
+    total, ok, fail, aborted,  // aborted = 页面/用户主动取消（ERR_ABORTED），不算失败
     latencySum, latencyCount,  // 分开存，才能既算平均值又不把「没测到」当 0
     unattributed,              // 拿到了响应、却按对端 IP 认不出是哪个节点的次数（决策 D18/D30）
     blind,                     // 命中规则、但 PAC 判定不了因而必然直连的次数（决策 D17）
@@ -288,13 +288,13 @@ Metrics {
   // 重试（决策 D24）。全是观测值，没有一个是推断出来的
   retry: {
     // 三个「判定」口径互不重叠，合起来 = 后台被问过多少次
-    attempted,   // 判定为重发，页面真的重新赋值了 src
-    exhausted,   // 用尽 maxAttempts 仍失败（不论后面有没有兜底接手）
+    attempted,   // 判定为重发并交给页面执行（执行前被移除时由 abandoned 结清）
+    exhausted,   // 轮询节点已用尽（独立判定；兜底是否救回由 fallbackProxy 另记）
     skipped,     // 不该重试：不归本扩展管 / 原因不是代理故障 / 查不到原因
 
     // 两个「结局」口径，描述 attempted 那些后来怎么了
     recovered,   // 重发之后收到了 load —— 不是「大概成功了」
-    abandoned,   // 重发了，但既没 load 也没 error：元素被换掉或页面导航走了（决策 D29）
+    abandoned,   // 重发/计划重发没等到结果：元素被换掉、页面导航走或看门狗换下一轮（决策 D29）
 
     // 这一个根本不在上面的账里 —— 它连「被问过」都没发生
     unseen,      // 网络层失败了，但页面侧压根没捕获到（决策 D28）
@@ -308,8 +308,9 @@ Metrics {
 }
 ```
 
-`recovered + abandoned ≤ attempted`，差额是「重发又失败了，已经进入下一轮判定」——
-面板把它算成 `retry.pending` 单列出来。**上一版没有 `abandoned` 与 `pending`**，
+`recovered + abandoned ≤ attempted`，差额就是面板上的 `retry.pending`。
+`exhausted` 是「用尽」的独立判定，不属于某次 attempted 的结局，不能从差额里再扣。
+**上一版没有 `abandoned` 与 `pending`**，
 于是实测「重发 7 次、救回 6 次」里那 1 次差额在界面上完全找不到（决策 D29）。
 
 **`latency` 是直方图而不是样本。** 10 个整数、桶边界写死在代码里，所以 D14「体积与

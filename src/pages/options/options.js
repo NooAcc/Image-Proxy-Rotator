@@ -16,7 +16,7 @@ import {
 } from '../shared/api.js';
 import { btn, badge, statusChip, statusLabel, setBanner, announce, kpi, shareBar, kvRow } from '../shared/ui.js';
 import { matchUrl, matchPacUrl, compileRule, validateRule, createRule } from '../../lib/rule-matcher.js';
-import { deepRetryPatterns } from '../../lib/deep-retry.js';
+import { deepRetryPatterns, unseenAdvice } from '../../lib/deep-retry.js';
 import { pacUrl, isSanitizedScheme } from '../../lib/pac-url.js';
 
 import { isSupported, isSelectable, protocolLabel, unsupportedNodes } from '../../lib/node-model.js';
@@ -218,6 +218,12 @@ function renderRequestKpis() {
     kpi({ label: '成功', value: req.ok, unit: '次', tone: 'ok' }),
     kpi({ label: '失败', value: req.fail, unit: '次', tone: req.fail > 0 ? 'err' : '' }),
     kpi({
+      label: '中止/取消',
+      value: req.aborted,
+      unit: '次',
+      hint: req.aborted > 0 ? '多为翻页/导航主动取消，不是代理失败，不计入失败' : '',
+    }),
+    kpi({
       label: '成功率',
       value: req.successRate,
       unit: '%',
@@ -315,23 +321,23 @@ function renderRetryKpis() {
       tone: retry.recoveryRate === null ? '' : (retry.recoveryRate >= 50 ? 'ok' : 'warn'),
     }),
     kpi({
-      label: '用尽仍失败',
+      label: '节点用尽',
       value: retry.exhausted,
       unit: '次',
       tone: retry.exhausted > 0 ? 'err' : '',
-      hint: retry.exhausted > 0 ? '所有节点都取不到这些图' : '',
+      hint: retry.exhausted > 0 ? '轮询节点已试尽，是否救回看兜底与后续' : '',
     }),
     kpi({
       label: '结果未知',
       value: retry.abandoned,
       unit: '次',
-      hint: retry.abandoned > 0 ? '重发了，但图片已被页面换掉' : '',
+      hint: retry.abandoned > 0 ? '重发/计划重发没等到结果（页面换图、移除或看门狗换下一轮）' : '',
     }),
     kpi({
       label: '还没有结论',
       value: retry.pending,
       unit: '次',
-      hint: retry.pending > 0 ? '刚重发出去，仍在等加载结果' : '',
+      hint: retry.pending > 0 ? '已判定重发，还没等到结果' : '',
     }),
     kpi({
       label: '判定为不重试',
@@ -381,14 +387,14 @@ function renderRetryKpis() {
   // 反复调重试次数，而那个旋钮对这些图一点作用都没有
   //
   // 补丁装上之后措辞必须跟着变：那时「调高重试次数没有用」不再成立，而
-  // 「deep 恒为 0 但 unseen 照旧居高不下」反倒是「补丁没装上」的指认
+  // 「deep 恒为 0 但 unseen 照旧居高不下」反倒是「补丁没装上」的指认。
+  // 后半句交给 unseenAdvice 按「是否已配置 / 是否有介入」分别说。
+  const advice = unseenAdvice(retry, config?.settings);
   setBanner($('unseenWarning'), retry.unseen > 0
     ? `有 ${retry.unseen} 次失败没能被页面捕获到，重试机制碰不到它们。`
       + '只有 DOM 里的 <img> 会派发可捕获的 error，而很多阅读器用 new Image() 预加载、'
       + '或用 fetch 取 blob —— 那些图裂了，扩展收不到任何通知，调高重试次数也没有用。'
-      + (retry.deep > 0
-        ? `（「深度重试」已经接住了 ${retry.deep} 次，剩下的这些是补丁也够不到的：CSS 背景图、canvas。）`
-        : '要覆盖这类请求，请在下面的「深度重试站点」里加上这个站点。')
+      + advice.text
     : '', 'warn');
 }
 

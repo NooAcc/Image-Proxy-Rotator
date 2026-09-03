@@ -70,6 +70,11 @@ export function emptyMetrics() {
       total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0,
       unattributed: 0, blind: 0, viaNodeIp: 0,
       /**
+       * 主动取消 / 页面导航中止的请求。它确实被送去代理过，但没有结果——
+       * 不是代理失败，不该把成功率拉低，也不该进平均耗时。
+       */
+      aborted: 0,
+      /**
        * 从浏览器缓存直接返回、没有走网络的次数。
        *
        * 必须单列，否则它会同时污染四个数字：总量（一张图被翻回来看九次就记九次）、
@@ -112,7 +117,7 @@ export function emptyMetrics() {
      * 兜底代理：轮询节点全试过之后接手了多少次，以及它自己的成败。
      *
      * `cooldown` 是第四个口径，1.5.0 新增：该源正处在冷却期，于是这次用尽**没有**
-     * 交给兜底。不单列它，用户会看到「用尽仍失败」在涨而「兜底接管」不动，读起来
+     * 交给兜底。不单列它，用户会看到「节点用尽」在涨而「兜底接管」不动，读起来
      * 像兜底坏了 —— 实际是冷却在按设计抑制它。
      */
     fallbackProxy: { used: 0, ok: 0, fail: 0, cooldown: 0 },
@@ -221,7 +226,8 @@ function touch(metrics, at) {
  * @returns {object} 同一个 metrics，便于链式调用
  */
 export function noteRequest(metrics, {
-  ok, latencyMs, nodeId, viaNodeIp = false, ruleId, blind = false, cached = false, responded = true, at,
+  ok, aborted = false, latencyMs, nodeId, viaNodeIp = false,
+  ruleId, blind = false, cached = false, responded = true, at,
 } = {}) {
   touch(metrics, at);
   const req = metrics.requests;
@@ -235,12 +241,13 @@ export function noteRequest(metrics, {
   }
 
   req.total++;
-  if (ok) req.ok++;
+  if (aborted) req.aborted++;
+  else if (ok) req.ok++;
   else req.fail++;
 
   // 只有真正测到的耗时才进平均值。把缺失当 0 会把平均耗时越算越低，
   // 那种「数字很好看但没有意义」的指标比没有指标更糟。
-  if (Number.isFinite(latencyMs) && latencyMs >= 0) {
+  if (!aborted && Number.isFinite(latencyMs) && latencyMs >= 0) {
     req.latencySum += Math.round(latencyMs);
     req.latencyCount++;
     metrics.latency[bucketOf(latencyMs)]++;
@@ -279,14 +286,15 @@ export function noteRequest(metrics, {
  * 记一次重试判定的结果。
  *
  * 三个**判定**口径互不重叠，合起来等于「后台被问过多少次『这张图该怎么办』」：
- *   · attempted —— 判定为重发，内容脚本真的重新赋值了 src
- *   · exhausted —— 用尽 maxAttempts 仍失败（不论后面有没有兜底接手）
+ *   · attempted —— 判定为重发并交给页面执行（若执行前图片被移除，页面会以 abandoned 结清）
+ *   · exhausted —— 轮询节点已用尽（独立判定：它对应的 ask 是 fallback / give-up，
+ *     不是一次被计进 attempted 的 retry；兜底是否救回由 fallbackProxy 另记）
  *   · skipped   —— 不该重试：URL 不归本扩展管、原因不是代理故障、或压根查不到原因
  *
  * 两个**结局**口径描述 attempted 那些后来怎么了（`recovered + abandoned ≤ attempted`，
  * 差额是「重发又失败了，已经进入下一轮判定」）：
  *   · recovered —— 重发之后收到了 load。**这是回报值，不是推断值**（决策 D24）
- *   · abandoned —— 重发出去了，却既没 load 也没 error。元素被页面换掉或导航走了，
+ *   · abandoned —— 重发/计划重发没等到结果：元素被页面换掉或导航走了，
  *     渲染进程不会再派发任何事件，这次重发的结局**永远不会有人回报**。真实数据里
  *     attempted=7 / recovered=6，差的那 1 次就是它：`ERR_ABORTED` 在网络层出现，
  *     img 上却什么都没派发。不单列它，面板上四个格子加起来就是 6，那 1 次无处可查。
@@ -541,6 +549,7 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       // 从浏览器缓存直接返回、没有走网络的次数。翻回去重看一页漫画会大量命中这里 ——
       // 它是「扩展没在工作」的反面证据，不是问题，但必须与真实请求分开数
       cached: req.cached,
+      aborted: req.aborted,
       // 对端 IP 属于某个节点的次数。分不出具体是哪个节点（多个节点共用一个地址）时
       // 它照样成立 —— 「真的从代理回来了」和「是哪个节点」是两个问题
       viaNodeIp: req.viaNodeIp,
@@ -548,7 +557,7 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       // 这一项不为零就说明有规则写成了 PAC 判定不了的形态 —— 是最值得先查的信号
       blind: req.blind,
       routed: Math.max(0, req.total - req.blind),
-      successRate: rate(req.ok, req.total),
+      successRate: rate(req.ok, req.ok + req.fail),
       avgLatencyMs: req.latencyCount ? Math.round(req.latencySum / req.latencyCount) : null,
       // 平均值对长尾没有抵抗力，这两个才是用户实际的体感。见 LATENCY_BUCKETS_MS
       latencyP50: percentile(m.latency, 0.5),
@@ -573,9 +582,12 @@ export function summarizeMetrics(metrics, { nodes = [], rules = [] } = {}) {
       // 只由「一张图超过阈值还在加载」驱动
       slow: m.retry.slow,
       // 重发了却还没有结论的次数。不为零本身是有用的信号：要么还在路上，要么页面
-      // 在重发之后被换掉了而「结果未知」的超时还没到。上一版没有这一格，于是
-      // 「重发 7 次、救回 6 次」里那 1 次差额在面板上完全找不到
-      pending: Math.max(0, m.retry.attempted - m.retry.recovered - m.retry.abandoned - m.retry.exhausted),
+      // 在重发之后被换掉了而「结果未知」的超时还没到，要么重发还没真正发出。
+      // 上一版没有这一格，于是「重发 7 次、救回 6 次」里那 1 次差额在面板上完全找不到。
+      //
+      // exhausted 是「用尽 maxAttempts」这个独立判定，不是某一次 retry 的结局，
+      // 扣它会把真正悬空的 attempted 从面板上藏掉（实测里会出现负数被 clamp 成 0）。
+      pending: Math.max(0, m.retry.attempted - m.retry.recovered - m.retry.abandoned),
       recoveryRate: rate(m.retry.recovered, m.retry.attempted),
     },
     fallbackProxy: {

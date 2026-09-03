@@ -164,3 +164,33 @@ export function deepRetryActive(settings) {
   if (deep?.enabled !== true) return false;
   return deepRetryPatterns(deep.sites).patterns.length > 0;
 }
+
+/**
+ * 设置页「页面没捕获」告警的后半句。
+ *
+ * 三个分支对应三种不同的真实状态，不能只用 deep 是否大于 0 来判断：
+ * 用户明明已经启用了深度重试、补丁却一次都没介入时，再叫他去添加同一个站点
+ * 只会把排查引向错误方向。
+ *
+ * @param {{deep?: number, unseen?: number}} retry 统计视图里的 retry 字段
+ * @param {object} [settings] 完整配置的 settings（用于判断深度重试是否真的已配置）
+ * @returns {{kind: 'none'|'covered'|'not-seen'|'add', text: string}}
+ */
+export function unseenAdvice({ deep = 0, unseen = 0 } = {}, settings) {
+  if (!(unseen > 0)) return { kind: 'none', text: '' };
+  if (deep > 0) {
+    return {
+      kind: 'covered',
+      text: `（「深度重试」已经接住了 ${deep} 次，剩下的这些是补丁也够不到的：CSS 背景图、canvas。）`,
+    };
+  }
+  if (deepRetryActive(settings)) {
+    return {
+      kind: 'not-seen',
+      text: '已启用「深度重试站点」，但补丁一次都没接到这些失败。'
+        + '如果页面是在补丁注册前打开的，请刷新页面；刷新后仍为 0，'
+        + '请到诊断页查看活动日志里是否有注入错误，并在页面控制台检查 window.__ppDeepRetry。',
+    };
+  }
+  return { kind: 'add', text: '要覆盖这类请求，请在下面的「深度重试站点」里添加这个站点。' };
+}

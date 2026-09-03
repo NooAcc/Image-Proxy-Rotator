@@ -182,7 +182,16 @@ export async function planRetry({ url, attempt, via, cause } = {}) {
   // 走到这里的一定是「你的图片」（不归本扩展管的已经在上面提前返回了）。
   // 用尽了却没兜底算 exhausted，其余算 skipped —— 后者的含义是
   // 「这张图归我管，但我判断重试没有意义」
-  await noteRetryMetric({ kind: plan.reason === 'exhausted' ? 'exhausted' : 'skipped', at: Date.now() });
+  //
+  // exhausted 只在「第一次到达用尽点」时计：attempt == cap 那次（无论走没走兜底）
+  // 已经由 dispatchFallback / 本分支记过；兜底窗口打开后看门狗还会带着 attempt > cap
+  // 再来问，那只是同一轮用尽的后续 give-up，同一张图不该被计成第二次用尽。
+  const attemptNum = Math.max(1, Math.trunc(Number(attempt)) || 1);
+  const cap = Math.max(1, Math.trunc(Number(retry.maxAttempts)) || 1);
+  const metricKind = plan.reason === 'exhausted'
+    ? (attemptNum <= cap ? 'exhausted' : null)
+    : 'skipped';
+  if (metricKind) await noteRetryMetric({ kind: metricKind, at: Date.now() });
   if (plan.reason && shouldSpeak(`${hostOf(url)}|${plan.reason}`)) {
     log.add({
       level: plan.reason === 'exhausted' ? 'error' : 'info',

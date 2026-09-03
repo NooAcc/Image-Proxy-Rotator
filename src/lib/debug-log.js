@@ -142,7 +142,10 @@ function renderKv(data) {
 
 function renderLine(row, withNs) {
   const ns = withNs ? row.ns.padEnd(NS_COLUMN) : '';
-  return `${stampTime(row.at)}  ${ns}${row.ev.padEnd(EV_COLUMN)}${renderKv(row.data)}`.trimEnd();
+  // padEnd 对超过列宽的名字不会补出空格，事件名会和第一个 k= 粘在一起
+  // （真实日志里出现过 fallback-window-openedorigin=…）。超过列宽时显式补一个分隔。
+  const ev = row.ev.length > EV_COLUMN ? `${row.ev} ` : row.ev.padEnd(EV_COLUMN);
+  return `${stampTime(row.at)}  ${ns}${ev}${renderKv(row.data)}`.trimEnd();
 }
 
 /**

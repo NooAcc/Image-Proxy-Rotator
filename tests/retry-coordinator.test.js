@@ -303,6 +303,23 @@ test('兜底那一次再失败就到此为止，不会无限套娃', async () =>
   assert.equal(again.reason, 'exhausted');
 });
 
+test('兜底窗口内同一张图的后续 give-up 不重复计 exhausted', async () => {
+  await seed({ settings: { retry: { maxAttempts: 3 }, fallbackProxy: FALLBACK } });
+  const first = await askAfter({ error: 'net::ERR_PROXY_CONNECTION_FAILED' }, { attempt: 3 });
+  assert.equal(first.action, 'fallback');
+  assert.equal((await view()).retry.exhausted, 1);
+
+  const again = await handleMessage({
+    type: 'imageRetryAsk',
+    url: IMG_URL,
+    attempt: 4,
+    cause: 'slow',
+  });
+  assert.equal(again.reason, 'exhausted');
+  assert.equal((await view()).retry.exhausted, 1,
+    '同一张图同一轮只用尽一次，看门狗在兜底窗口里的再次问询不该再记一笔');
+});
+
 test('注入失败时不回 fallback，并把窗口撤回去', async () => {
   // 窗口记着「已开」而 PAC 里其实没有对应条目，是最糟的状态：下一张图会因为
   // 「窗口已开」直接重发，落到普通节点上却被记成一次兜底

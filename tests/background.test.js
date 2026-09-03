@@ -523,6 +523,34 @@ test('连接层失败也计入总量，成功率不虚高', async () => {
     '连接都没建起来就没有对端 IP —— 那不叫归因失败，叫压根没得归因');
 });
 
+test('主动取消（ERR_ABORTED）单列，不把成功率拉低', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onCompleted', { requestId: 'm-ok', url: IMG_URL, statusCode: 200, ip: '203.0.113.7' });
+  await stub.emit('onErrorOccurred', { requestId: 'm-abort', url: IMG_URL, error: 'net::ERR_ABORTED' });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.total, 2);
+  assert.equal(metrics.requests.ok, 1);
+  assert.equal(metrics.requests.fail, 0, '页面/用户取消不是代理失败');
+  assert.equal(metrics.requests.aborted, 1);
+  assert.equal(metrics.requests.successRate, 100);
+  const text = textOf(await logsOf({ kind: 'request' }));
+  assert.match(text, /中止/, '活动日志不该把用户取消说成代理“请求失败”');
+});
+
+test('关闭总开关不把 clear 当成一次注入时间', async () => {
+  const cfg = await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await applyProxy();
+  // 用固定值而不是 Date.now() 比较：同一毫秒内跑完会让“被刷新”和“没被刷新”
+  // 恰好得到同一个数，测试就失去区分力
+  getRuntime().lastApplyAt = 123456;
+
+  await setConfig(normalizeConfig({ ...cfg, enabled: false }));
+  await applyProxy();
+  assert.equal(getRuntime().lastApplyAt, 123456,
+    '撤销代理设置不算注入，不该刷新“上次注入”的时间');
+});
+
 test('归因不到节点的请求单独计数，不硬塞给某个节点', async () => {
   await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
   // 出口 IP 不属于任何已知节点：代理没转发、或出口地址还没测出来

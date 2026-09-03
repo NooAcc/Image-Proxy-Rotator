@@ -126,7 +126,8 @@ export async function applyProxy() {
     await clearProxy();
     const control = await readControl();
     runtime.control = control;
-    runtime.lastApplyAt = Date.now();
+    // 撤销不是注入：不清 lastApplyAt，否则关闭总开关会被界面读成「刚刚注入成功」。
+    // 需要知道“上次成功注入”时它应保留最后一次 set() 的时刻。
     if (dbg.on) dbg('pac', 'cleared', { enabled: config.enabled, nodeCount: summary.nodeCount, level: control.levelOfControl });
     log.add({
       level: config.enabled && summary.nodeCount === 0 ? 'warn' : 'info',
@@ -293,4 +294,3 @@ export async function applyProbePac(nodeId) {
   if (dbg.on) dbg('probe', 'pac-directed', { nodeId, bytes: pac.length, level: control.levelOfControl });
   return { ok: true };
 }
-

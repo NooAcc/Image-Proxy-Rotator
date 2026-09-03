@@ -386,6 +386,9 @@
       // 等待期间图片可能已被页面换掉或移除，这时重发没有意义
       if (!img.isConnected || pendingLoads.get(img) !== rec) {
         dbg('detached', { url, attempt });
+        // 后台已经把这次判定计成 attempted；没真正重发也要给它一个结局，
+        // 否则这张图会在「还没有结论」里永久悬空
+        report(url, plan.action === 'fallback' ? 'fallback' : 'retry', null);
         return;
       }
 
@@ -483,6 +486,7 @@
       // 等待期间图片可能已被页面换掉或移除，这时重发没有意义
       if (!img.isConnected) {
         dbg('detached', { url, attempt });
+        report(url, plan.action === 'fallback' ? 'fallback' : 'retry', null);
         return;
       }
 

@@ -38,7 +38,7 @@ test('emptyMetrics 每次都是新对象，字段齐全且全为零', () => {
   assert.equal(a.since, null);
   assert.deepEqual(a.requests, {
     total: 0, ok: 0, fail: 0, latencySum: 0, latencyCount: 0,
-    unattributed: 0, blind: 0, viaNodeIp: 0, cached: 0,
+    unattributed: 0, blind: 0, viaNodeIp: 0, cached: 0, aborted: 0,
   });
   assert.deepEqual(a.latency, new Array(LATENCY_BUCKETS_MS.length + 1).fill(0));
   assert.deepEqual(a.perNode, {});
@@ -95,6 +95,31 @@ test('耗时缺失或非法时只跳过耗时，其余照记', () => {
   assert.equal(m.requests.latencyCount, 0, '非法耗时不得进入平均值');
   assert.equal(m.requests.latencySum, 0);
   assert.equal(m.perNode.n_a.used, 6);
+});
+
+test('noteRequest 把主动取消单列，不计入成败', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: false, aborted: true, ruleId: 'r_1', at: 1 });
+  noteRequest(m, { ok: false, ruleId: 'r_1', at: 2 });
+  noteRequest(m, { ok: true, ruleId: 'r_1', at: 3 });
+
+  assert.equal(m.requests.total, 3);
+  assert.equal(m.requests.aborted, 1);
+  assert.equal(m.requests.fail, 1);
+  assert.equal(m.requests.ok, 1);
+  assert.equal(m.requests.latencyCount, 0, '中止请求没有响应，不该进平均耗时');
+  assert.deepEqual(m.perRule.r_1, { hits: 3 });
+});
+
+test('成功率的分母排除主动取消', () => {
+  const m = emptyMetrics();
+  noteRequest(m, { ok: true, at: 1 });
+  noteRequest(m, { ok: false, aborted: true, at: 2 });
+  const view = summarizeMetrics(m);
+  assert.equal(view.requests.total, 2);
+  assert.equal(view.requests.aborted, 1);
+  assert.equal(view.requests.fail, 0);
+  assert.equal(view.requests.successRate, 100, '取消不是失败，不能拉低成功率');
 });
 
 test('耗时为 0 是合法值', () => {
@@ -574,6 +599,19 @@ test('重发了却还没有结论的次数单独可见', () => {
 
   const view = summarizeMetrics(m);
   assert.equal(view.retry.pending, 4, '悬空的 4 次必须能在面板上看见，不能只体现为成功率变小');
+});
+
+test('pending 只结算有结局的重发，不扣独立的 exhausted 判定', () => {
+  const m = emptyMetrics();
+  for (let i = 0; i < 5; i++) noteRetry(m, { kind: 'attempted' });
+  noteRetry(m, { kind: 'recovered' });
+  noteRetry(m, { kind: 'abandoned' });
+  noteRetry(m, { kind: 'exhausted' });
+
+  const view = summarizeMetrics(m);
+  assert.equal(view.retry.exhausted, 1, '前提：用尽已经单独计过');
+  assert.equal(view.retry.pending, 3,
+    'exhausted 是「用尽后的判定」，不是某次 retry 的结局，不该从 pending 里扣掉');
 });
 
 // ---------------------------------------------------------------- 共用地址的节点
