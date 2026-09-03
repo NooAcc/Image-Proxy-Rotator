@@ -12,7 +12,12 @@
  */
 
 import { ALARM_EASY_PROXIES } from '../lib/constants.js';
-import { selectBestNodes, toProxyNodes, mergeEasyProxiesNodes } from '../lib/easy-proxies.js';
+import {
+  selectBestNodes,
+  toProxyNodes,
+  toLabelProxyNodes,
+  mergeEasyProxiesNodes,
+} from '../lib/easy-proxies.js';
 import { getConfig, updateConfig, getLogger } from './state.js';
 import { applyProxy } from './proxy-controller.js';
 
@@ -22,6 +27,45 @@ let syncInFlight = false;
 /** 去掉末尾斜杠，避免拼出 `//api/...` 的双斜杠路径 */
 function cleanBaseUrl(baseUrl) {
   return String(baseUrl ?? '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * 调本地标签服务的 /api/convert。
+ * @param {{url:string, token:string, selected:object[], host:string}} options
+ * @param {typeof fetch} [fetchImpl] 测试注入点
+ * @returns {Promise<object[]>} 服务返回的 nodes
+ */
+export async function convertViaLabelService({ url, token, selected, host }, fetchImpl = globalThis.fetch) {
+  const base = cleanBaseUrl(url);
+  const upstreams = (Array.isArray(selected) ? selected : []).map((entry) => ({
+    name: String(entry?.name ?? '').trim(),
+    host: String(host ?? '').trim(),
+    port: entry?.port,
+  }));
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let response;
+  try {
+    response = await fetchImpl(`${base}/api/convert`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ upstreams }),
+    });
+  } catch (e) {
+    throw new Error(`无法连接本地标签服务（${base}）：${e?.message || e}`);
+  }
+
+  let body = null;
+  try { body = await response.json(); } catch { /* 非 JSON 响应体 */ }
+  if (!response.ok) {
+    const detail = body?.error ? `：${body.error}` : `（HTTP ${response.status}）`;
+    throw new Error(`本地标签服务转换失败${detail}`);
+  }
+  if (!body || !Array.isArray(body.nodes)) {
+    throw new Error('本地标签服务返回格式异常：缺少 nodes 列表');
+  }
+  return body.nodes;
 }
 
 /** 把 HTTP 错误与响应体里的中文 error 拼成可读消息 */
@@ -95,7 +139,18 @@ export async function runEasyProxiesSync() {
 
     const payload = await fetchEasyProxiesNodes({ baseUrl: ep.baseUrl, password: ep.password });
     const selected = selectBestNodes(payload, ep.maxNodes);
-    const incoming = toProxyNodes(selected, host);
+    let incoming;
+    if (ep.labelServiceUrl) {
+      const converted = await convertViaLabelService({
+        url: ep.labelServiceUrl,
+        token: ep.labelServiceToken,
+        selected,
+        host,
+      });
+      incoming = toLabelProxyNodes(converted);
+    } else {
+      incoming = toProxyNodes(selected, host);
+    }
 
     let added = 0;
     let removed = 0;

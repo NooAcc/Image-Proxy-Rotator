@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   selectBestNodes,
   toProxyNodes,
+  toLabelProxyNodes,
   mergeEasyProxiesNodes,
   isEasyProxiesNode,
 } from '../src/lib/easy-proxies.js';
@@ -107,6 +108,45 @@ test('toProxyNodes 没有名称时用 host:port 兜底', () => {
   assert.equal(nodes[0].name, '10.0.0.3:24002');
 });
 
+test('toLabelProxyNodes 把本地标签服务返回的节点转成扩展节点形状', () => {
+  const nodes = toLabelProxyNodes([
+    {
+      name: '香港01',
+      host: '127.0.0.2',
+      port: 8080,
+      upstreamHost: '10.0.0.3',
+      upstreamPort: 24001,
+    },
+    {
+      name: '香港02',
+      host: '127.0.0.3',
+      port: 8080,
+      upstreamHost: '10.0.0.3',
+      upstreamPort: 24002,
+    },
+  ]);
+
+  assert.equal(nodes.length, 2);
+  assert.equal(nodes[0].protocol, 'http');
+  assert.equal(nodes[0].host, '127.0.0.2');
+  assert.equal(nodes[0].port, 8080);
+  assert.equal(nodes[0].name, '香港01');
+  assert.equal(nodes[0].raw, 'http://127.0.0.2:8080#香港01');
+  assert.equal(nodes[0].meta.easyProxies, true);
+  assert.deepEqual(nodes[0].meta.labelProxy, {
+    upstreamHost: '10.0.0.3',
+    upstreamPort: 24001,
+  });
+  assert.equal(nodes[1].host, '127.0.0.3');
+});
+
+test('toLabelProxyNodes 没有名称时用本地 host:port 兜底', () => {
+  const nodes = toLabelProxyNodes([
+    { name: '', host: '127.0.0.2', port: 8080, upstreamHost: '10.0.0.3', upstreamPort: 24001 },
+  ]);
+  assert.equal(nodes[0].name, '127.0.0.2:8080');
+});
+
 test('mergeEasyProxiesNodes 只替换旧的自动节点，保留手写节点', () => {
   const current = [
     { id: 'n_user1', name: '我的节点', protocol: 'http', host: '10.0.0.3', port: 3000, meta: {} },
@@ -145,6 +185,24 @@ test('mergeEasyProxiesNodes 输出可被 normalizeConfig 接受', () => {
   assert.equal(cfg.nodes[0].health.status, 'unknown', '健康状态应由扩展自己的测速决定');
 });
 
+test('mergeEasyProxiesNodes 能用手写同地址规则替换旧的同 IP 自动节点为标签节点', () => {
+  const current = [
+    { id: 'n_user1', name: '手写', protocol: 'http', host: '10.0.0.3', port: 3000, meta: {} },
+    { id: 'n_old1', name: '旧自动', protocol: 'http', host: '10.0.0.3', port: 24001, meta: { easyProxies: true } },
+  ];
+  const incoming = toLabelProxyNodes([
+    { name: '新标签', host: '127.0.0.2', port: 8080, upstreamHost: '10.0.0.3', upstreamPort: 24001 },
+  ]);
+  const { nodes, removed, added } = mergeEasyProxiesNodes(current, incoming);
+
+  assert.equal(removed, 1);
+  assert.equal(added, 1);
+  assert.equal(nodes.length, 2);
+  const auto = nodes.find((n) => isEasyProxiesNode(n));
+  assert.equal(auto.host, '127.0.0.2');
+  assert.equal(auto.meta.labelProxy.upstreamPort, 24001);
+});
+
 // ---------------------------------------------------------------- 设置项
 
 test('默认配置带 easyProxies 设置且默认关闭', () => {
@@ -155,6 +213,8 @@ test('默认配置带 easyProxies 设置且默认关闭', () => {
     password: '',
     maxNodes: 15,
     intervalMinutes: 60,
+    labelServiceUrl: '',
+    labelServiceToken: '',
     lastSyncAt: null,
     lastSyncCount: null,
     lastSyncError: null,
@@ -170,6 +230,8 @@ test('easyProxies 设置被规范化：数量与间隔夹进合法区间，非�
         password: 'secret',
         maxNodes: 9999,
         intervalMinutes: -5,
+        labelServiceUrl: 'ftp://bad',
+        labelServiceToken: 'token-123',
         lastSyncAt: 1234,
         lastSyncCount: 7,
         lastSyncError: 'boom',
@@ -182,6 +244,8 @@ test('easyProxies 设置被规范化：数量与间隔夹进合法区间，非�
   assert.equal(ep.password, 'secret');
   assert.equal(ep.maxNodes, 500, '数量上限与节点容量上限一致');
   assert.equal(ep.intervalMinutes, 0, '负数应夹到 0（仅启动时/手动）');
+  assert.equal(ep.labelServiceUrl, '', '非法服务地址应回落为空');
+  assert.equal(ep.labelServiceToken, 'token-123');
   assert.equal(ep.lastSyncAt, 1234);
   assert.equal(ep.lastSyncCount, 7);
   assert.equal(ep.lastSyncError, 'boom');
@@ -192,6 +256,13 @@ test('easyProxies 管理地址没写 scheme 时自动补 http://', () => {
     settings: { easyProxies: { enabled: true, baseUrl: '10.0.0.3:19090' } },
   }).settings.easyProxies;
   assert.equal(ep.baseUrl, 'http://10.0.0.3:19090');
+});
+
+test('easyProxies 本地标签服务地址没写 scheme 时自动补 http://', () => {
+  const ep = normalizeConfig({
+    settings: { easyProxies: { labelServiceUrl: '127.0.0.1:19091' } },
+  }).settings.easyProxies;
+  assert.equal(ep.labelServiceUrl, 'http://127.0.0.1:19091');
 });
 
 test('easyProxies 设置本身是垃圾时回落到默认值', () => {

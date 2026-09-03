@@ -79,6 +79,39 @@ export function toProxyNodes(selected, host) {
   }));
 }
 
+/**
+ * 把本地标签服务 `/api/convert` 返回的节点转成扩展节点形状。
+ *
+ * 每个返回项已经带唯一的本地回环 host/port，额外保留 upstreamHost/upstreamPort
+ * 作为元数据，供排查/展示「这个标签背后是哪个 easy_proxies 端口」。
+ *
+ * @param {{name:string, host:string, port:number, upstreamHost:string, upstreamPort:number}[]} converted
+ */
+export function toLabelProxyNodes(converted) {
+  const entries = Array.isArray(converted) ? converted : [];
+  return entries.map((item) => {
+    const host = String(item?.host ?? '').trim().replace(/^\[|\]$/g, '');
+    const port = Number.parseInt(item?.port, 10);
+    const name = String(item?.name ?? '').trim() || `${host}:${port}`;
+    return {
+      protocol: 'http',
+      host,
+      port,
+      username: '',
+      password: '',
+      name,
+      raw: `http://${host}:${port}#${name}`,
+      meta: {
+        [EASY_PROXIES_MARKER]: true,
+        labelProxy: {
+          upstreamHost: String(item?.upstreamHost ?? '').trim(),
+          upstreamPort: Number.parseInt(item?.upstreamPort, 10),
+        },
+      },
+    };
+  });
+}
+
 /** 节点去重键：同协议 + 同地址 + 同端口 */
 function nodeKey(node) {
   return `${node.protocol}|${node.host}|${node.port}`;

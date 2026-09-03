@@ -129,6 +129,81 @@ test('空节点列表同步成功但不报错、不改动现有节点', async ()
   assert.equal(cfg.nodes[0].id, 'n_aaaaaa01');
 });
 
+test('runEasyProxiesSync 配置本地标签服务时转换并写回标签节点', async () => {
+  await seed({
+    labelServiceUrl: 'http://127.0.0.1:19091',
+    labelServiceToken: 'secret',
+  }, {
+    enabled: true,
+    nodes: [
+      nodeFixture('n_aaaaaa01', { host: '10.0.0.3', port: 3000 }),
+      nodeFixture('n_aaaaaa02', { host: '10.0.0.3', port: 24001, meta: { easyProxies: true } }),
+    ],
+  });
+
+  stub.setFetch(async (url, options = {}) => {
+    if (url === 'http://10.0.0.3:19090/api/nodes') {
+      return jsonResponse({
+        nodes: [
+          epNode({ tag: 'fast', name: '快', port: 24001, last_latency_ms: 100 }),
+          epNode({ tag: 'slow', name: '慢', port: 24002, last_latency_ms: 900 }),
+        ],
+      });
+    }
+    assert.equal(url, 'http://127.0.0.1:19091/api/convert');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers.Authorization, 'Bearer secret');
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.upstreams, [
+      { name: '快', host: '10.0.0.3', port: 24001 },
+      { name: '慢', host: '10.0.0.3', port: 24002 },
+    ]);
+    return jsonResponse({
+      ok: true,
+      nodes: [
+        { name: '快', host: '127.0.0.2', port: 8080, upstreamHost: '10.0.0.3', upstreamPort: 24001 },
+        { name: '慢', host: '127.0.0.3', port: 8080, upstreamHost: '10.0.0.3', upstreamPort: 24002 },
+      ],
+    });
+  });
+
+  const result = await runEasyProxiesSync();
+  const cfg = await getConfig();
+
+  assert.equal(result.added, 2);
+  assert.equal(result.removed, 1);
+  const auto = cfg.nodes.filter((n) => n.meta?.easyProxies === true);
+  assert.deepEqual(auto.map((n) => n.host), ['127.0.0.2', '127.0.0.3']);
+  assert.deepEqual(auto.map((n) => n.meta.labelProxy.upstreamPort), [24001, 24002]);
+  assert.ok(cfg.nodes.some((n) => n.id === 'n_aaaaaa01'), '手写节点必须保留');
+  assert.equal(cfg.settings.easyProxies.lastSyncError, null);
+  assert.notEqual(stub.lastPac(), null);
+});
+
+test('本地标签服务不可用时同步失败且不清空现有自动节点', async () => {
+  await seed({
+    labelServiceUrl: 'http://127.0.0.1:19091',
+  }, {
+    enabled: true,
+    nodes: [
+      nodeFixture('n_aaaaaa02', { host: '10.0.0.3', port: 24001, meta: { easyProxies: true } }),
+    ],
+  });
+
+  stub.setFetch(async (url) => {
+    if (url === 'http://10.0.0.3:19090/api/nodes') {
+      return jsonResponse({ nodes: [epNode({ tag: 'only' })] });
+    }
+    return jsonResponse({ ok: false, error: '本地标签服务未启动' }, { ok: false, status: 503 });
+  });
+
+  await assert.rejects(() => runEasyProxiesSync(), /本地标签服务未启动/);
+  const cfg = await getConfig();
+  assert.equal(cfg.nodes.length, 1, '失败时不得清空现有节点');
+  assert.equal(cfg.nodes[0].meta.easyProxies, true);
+  assert.match(cfg.settings.easyProxies.lastSyncError, /本地标签服务未启动/);
+});
+
 // ---------------------------------------------------------------- 认证
 
 test('配置了密码时先 POST /api/auth 再带 Bearer token 拉取', async () => {

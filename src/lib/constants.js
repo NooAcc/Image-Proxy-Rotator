@@ -275,6 +275,10 @@ export function defaultEasyProxiesSettings() {
     maxNodes: 15,
     /** 定时同步间隔（分钟）；0 = 只启动时同步一次，不做定时 */
     intervalMinutes: 60,
+    /** 本地标签工具的服务地址；留空 = 按原始 easy_proxies 地址写回 */
+    labelServiceUrl: '',
+    /** 本地标签服务的 Bearer token（与工具 config.service.token 一致） */
+    labelServiceToken: '',
     /** 最近一次同步的结果（供设置页展示，属于状态字段） */
     lastSyncAt: null,
     lastSyncCount: null,

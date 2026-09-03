@@ -283,6 +283,22 @@ export function normalizeEasyProxiesSettings(raw) {
     }
   }
 
+  let labelServiceUrl = '';
+  const serviceText = asString(raw.labelServiceUrl).trim();
+  if (serviceText) {
+    const withScheme = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(serviceText)
+      ? serviceText
+      : `http://${serviceText}`;
+    try {
+      const parsed = new URL(withScheme);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        labelServiceUrl = withScheme;
+      }
+    } catch {
+      // 非法地址回落为空
+    }
+  }
+
   const lastSyncCount = Number.parseInt(raw.lastSyncCount, 10);
   return {
     enabled: raw.enabled === true,
@@ -290,6 +306,8 @@ export function normalizeEasyProxiesSettings(raw) {
     password: asString(raw.password),
     maxNodes: clampInt(raw.maxNodes, 1, EASY_PROXIES_MAX_NODES_CAP, base.maxNodes),
     intervalMinutes: clampInt(raw.intervalMinutes, 0, 1440, base.intervalMinutes),
+    labelServiceUrl,
+    labelServiceToken: asString(raw.labelServiceToken),
     lastSyncAt: Number.isFinite(raw.lastSyncAt) ? Math.round(raw.lastSyncAt) : null,
     lastSyncCount: Number.isInteger(lastSyncCount) && lastSyncCount >= 0 ? lastSyncCount : null,
     lastSyncError: raw.lastSyncError == null ? null : asString(raw.lastSyncError),
