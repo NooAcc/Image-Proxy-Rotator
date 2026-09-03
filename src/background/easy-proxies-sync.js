@@ -140,7 +140,7 @@ export async function runEasyProxiesSync() {
     const payload = await fetchEasyProxiesNodes({ baseUrl: ep.baseUrl, password: ep.password });
     const selected = selectBestNodes(payload, ep.maxNodes);
     let incoming;
-    if (ep.labelServiceUrl) {
+    if (ep.labelServiceUrl && selected.length > 0) {
       const converted = await convertViaLabelService({
         url: ep.labelServiceUrl,
         token: ep.labelServiceToken,

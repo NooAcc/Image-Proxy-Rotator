@@ -129,6 +129,22 @@ test('空节点列表同步成功但不报错、不改动现有节点', async ()
   assert.equal(cfg.nodes[0].id, 'n_aaaaaa01');
 });
 
+test('空节点列表且配置本地标签服务时跳过转换，不调用 /api/convert', async () => {
+  await seed({ labelServiceUrl: 'http://127.0.0.1:19091' }, {
+    nodes: [nodeFixture('n_aaaaaa01')],
+  });
+  stub.setFetch(async (url) => {
+    assert.equal(url, 'http://10.0.0.3:19090/api/nodes');
+    return jsonResponse({ nodes: [] });
+  });
+
+  const result = await runEasyProxiesSync();
+  const cfg = await getConfig();
+  assert.equal(result.added, 0);
+  assert.equal(cfg.nodes.length, 1);
+  assert.equal(cfg.settings.easyProxies.lastSyncError, null);
+});
+
 test('runEasyProxiesSync 配置本地标签服务时转换并写回标签节点', async () => {
   await seed({
     labelServiceUrl: 'http://127.0.0.1:19091',
