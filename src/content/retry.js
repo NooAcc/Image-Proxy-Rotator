@@ -504,10 +504,98 @@
     }
   }
 
+  // ---------------------------------------------------------------- open shadow root
+
+  /**
+   * 已经接管过的 ShadowRoot。WeakSet 防重复挂监听，也避免长期持有已卸载的 root。
+   *
+   * 为什么必须做这一层：ComicRead 这类阅读器把整页 `<img>` 渲染进
+   * `attachShadow({ mode: 'open' })` 里。外层 document 的捕获监听即使能收到事件，
+   * 目标也会被 retarget 成宿主（closed 模式下甚至拿不到内部节点），
+   * 所以直接把同一组监听挂到每个 open ShadowRoot 内部。
+   */
+  const installedShadowRoots = new WeakSet();
+
+  function scanShadowRoots(root) {
+    if (!root || typeof root.querySelectorAll !== 'function') return;
+    let elements;
+    try {
+      elements = root.querySelectorAll('*');
+    } catch {
+      return;
+    }
+    for (const el of elements) {
+      try {
+        if (el.shadowRoot) installShadowRoot(el.shadowRoot);
+      } catch {
+        // 个别元素可能已经处于不可用的生命周期，跳过它
+      }
+    }
+  }
+
+  function scanAddedNode(node) {
+    if (!node || node.nodeType !== 1) return;
+    try {
+      if (node.shadowRoot) installShadowRoot(node.shadowRoot);
+    } catch {
+      // 同上
+    }
+    scanShadowRoots(node);
+  }
+
+  function installShadowRoot(shadow) {
+    if (!shadow || installedShadowRoots.has(shadow)) return;
+    installedShadowRoots.add(shadow);
+
+    try {
+      shadow.addEventListener('loadstart', onLoadStart, true);
+      shadow.addEventListener('load', onLoadFinished, true);
+      shadow.addEventListener('abort', onLoadFinished, true);
+      shadow.addEventListener('error', onResourceError, true);
+    } catch {
+      // 挂不上就退回现有 document 捕获，绝不让内容脚本初始化失败
+    }
+
+    // open shadow root 里还可能再嵌一层 shadow host
+    scanShadowRoots(shadow);
+
+    try {
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) scanAddedNode(node);
+        }
+      });
+      observer.observe(shadow, { childList: true, subtree: true });
+    } catch {
+      // 老环境没有 MutationObserver 时，至少已挂载的 shadow root 仍被接管
+    }
+  }
+
+  /**
+   * document_start 时页面还没开始建 shadow host，所以不能只扫一次：
+   * 既要扫当前 DOM，也要监听以后被插入的 host。
+   */
+  function installOpenShadowListeners() {
+    if (typeof MutationObserver !== 'function') return;
+    try {
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) scanAddedNode(node);
+        }
+      });
+      observer.observe(document, { childList: true, subtree: true });
+    } catch {
+      // document 还没准备好时观察可能失败；下面那次扫描会兜住已存在的部分
+    }
+    scanShadowRoots(document);
+  }
+
   // 资源加载失败的 error 事件不冒泡，但会经过捕获阶段 —— 所以只能在这里挂，
   // 且必须用 capture=true。loadstart / load / abort 同理，全走捕获阶段。
   document.addEventListener('loadstart', onLoadStart, true);
   document.addEventListener('load', onLoadFinished, true);
   document.addEventListener('abort', onLoadFinished, true);
   document.addEventListener('error', onResourceError, true);
+
+  installOpenShadowListeners();
 })();

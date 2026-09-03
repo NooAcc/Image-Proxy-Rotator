@@ -343,7 +343,7 @@ function renderRetryKpis() {
       label: '判定为不重试',
       value: retry.skipped,
       unit: '次',
-      hint: retry.skipped > 0 ? '多为图源自己回了 4xx/5xx' : '',
+      hint: retry.skipped > 0 ? '多为图源自己回了 404/5xx（429 会换节点重试）' : '',
     }),
     kpi({
       label: '页面没捕获',

@@ -297,7 +297,8 @@
   async function onXhrError(xhr) {
     const state = xhrState.get(xhr);
     if (!state || state.aborted || state.busy || !state.url) return;
-    // status 不为 0 说明拿到了 HTTP 响应，那不是网络层失败 —— 4xx/5xx 不重试（决策 D22）
+    // status 不为 0 说明拿到了 HTTP 响应，那不是网络层失败 —— 这一条路不处理 4xx/5xx；
+    // 图片路径的 HTTP 429 由 retry.js 捕获 error 后走后台的 rate-limit 判定
     if (xhr.status !== 0) return;
 
     state.busy = true;

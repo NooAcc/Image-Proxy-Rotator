@@ -538,6 +538,19 @@ test('主动取消（ERR_ABORTED）单列，不把成功率拉低', async () => 
   assert.match(text, /中止/, '活动日志不该把用户取消说成代理“请求失败”');
 });
 
+test('被其他扩展/策略拦截也单列为取消，不计入代理失败；只是不重试', async () => {
+  await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
+  await stub.emit('onErrorOccurred', {
+    requestId: 'm-blocked', url: IMG_URL, error: 'net::ERR_BLOCKED_BY_CLIENT',
+  });
+
+  const { metrics } = await handleMessage({ type: 'getState' });
+  assert.equal(metrics.requests.fail, 0, '拦截不是代理失败');
+  assert.equal(metrics.requests.aborted, 1);
+  const text = textOf(await logsOf({ kind: 'request' }));
+  assert.match(text, /中止/, '活动日志不该把拦截说成代理“请求失败”');
+});
+
 test('关闭总开关不把 clear 当成一次注入时间', async () => {
   const cfg = await seed({ nodes: [nodeFixture('n_aaaaaaa1')] });
   await applyProxy();

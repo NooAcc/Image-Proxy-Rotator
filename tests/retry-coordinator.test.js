@@ -105,6 +105,30 @@ test('图源返回 404 → 不重试。换个代理拿到的还是同一个 404'
   assert.equal(m.retry.skipped, 1, '不重试也要留痕，否则用户查不出为什么没重试');
 });
 
+test('图源返回 429 → 换一个出口重试：429 是限流，不是内容问题', async () => {
+  await seed();
+  const plan = await askAfter({ statusCode: 429 });
+
+  assert.equal(plan.action, 'retry');
+  assert.equal(plan.delayMs, 300);
+
+  const m = await view();
+  assert.equal(m.retry.attempted, 1);
+  assert.equal(m.retry.skipped, 0);
+});
+
+test('ERR_ABORTED 被页面捕获到时按可重试处理', async () => {
+  // 纯后台观测到的取消（翻页/关页）不会来问；能走到这里说明图片元素仍然活着
+  // 且浏览器在它上面派发了 error —— 对用户来说这张图确实裂了
+  await seed();
+  const plan = await askAfter({ error: 'net::ERR_ABORTED' });
+
+  assert.equal(plan.action, 'retry');
+  const m = await view();
+  assert.equal(m.retry.attempted, 1);
+  assert.equal(m.retry.skipped, 0);
+});
+
 test('查不到失败原因时保守放弃，不盲目重刷', async () => {
   // 刻意不发任何 webRequest 事件：模拟渲染进程的 error 抢在网络层回调之前到达
   await seed();

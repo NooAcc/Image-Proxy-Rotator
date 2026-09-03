@@ -62,7 +62,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** give-up 的理由 -> 给用户看的中文 */
 const GIVE_UP_TEXT = {
   'not-routed': '该地址不匹配任何启用的规则，不是本扩展路由出去的，不干预',
-  'not-proxy-failure': '失败原因不是代理故障（多为图源返回 4xx/5xx），换代理也是同样结果',
+  'not-proxy-failure': '失败原因不是代理故障（多为图源返回 404/5xx、或被其他扩展拦截），换代理也是同样结果',
   'unknown-cause': '查不到这次失败的原因，保守起来不重试',
   exhausted: '已用尽可尝试的节点，且兜底代理未启用或不可用',
   cooldown: '已用尽可尝试的节点，而该图源刚用过兜底代理、正处在冷却期',
@@ -169,7 +169,12 @@ export async function planRetry({ url, attempt, via, cause } = {}) {
         message: cause === 'slow'
           ? `${hostOf(url)} 的图片加载超过阈值仍没完成，`
             + `正在换一个节点重发（最多尝试 ${retry.maxAttempts} 个节点）。具体次数见统计页。`
-          : `${hostOf(url)} 的图片加载失败（${kind === 'proxy' ? '代理故障' : '连接失败'}），`
+          : `${hostOf(url)} 的图片加载失败（`
+            + (kind === 'proxy' ? '代理故障'
+              : kind === 'rate-limit' ? '图源返回 429 限流'
+                : kind === 'aborted' ? '请求被中止，但页面仍报告图片失败'
+                  : '连接失败')
+            + '），'
             + `正在换一个节点重发（最多尝试 ${retry.maxAttempts} 个节点）。具体次数见统计页。`,
       });
     }

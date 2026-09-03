@@ -93,6 +93,52 @@ function mount(respond, options = {}) {
   const docHandlers = {};
   let onError = null;
 
+  class FakeMutationObserver {
+    constructor(callback) {
+      this.callback = callback;
+    }
+
+    observe(target) {
+      target.__ppObservers ??= [];
+      target.__ppObservers.push(this);
+    }
+
+    disconnect() {}
+  }
+
+  function makeShadowRoot() {
+    const handlers = {};
+    return {
+      __ppHandlers: handlers,
+      __ppObservers: [],
+      addEventListener(type, fn, capture) {
+        if (type === 'error') {
+          // 与 document 同一条纪律：error 只走捕获阶段
+          assert.equal(capture, true, 'shadow root 的 error 监听必须用捕获阶段');
+        }
+        (handlers[type] ??= []).push(fn);
+      },
+      querySelectorAll() {
+        return [];
+      },
+    };
+  }
+
+  function createShadowHost() {
+    const host = {
+      nodeType: 1,
+      tagName: 'DIV',
+      shadowRoot: null,
+      querySelectorAll() {
+        return [];
+      },
+    };
+    const shadow = makeShadowRoot();
+    host.shadowRoot = shadow;
+    fakeDocument.__ppHosts.push(host);
+    return { host, shadow };
+  }
+
   /**
    * 假时钟。**必须接管** setTimeout：内容脚本为每次重发挂一个 25 秒的「没下文」超时，
    * 用真定时器的话每个用例结束后都会把进程多挂 25 秒。
@@ -135,6 +181,24 @@ function mount(respond, options = {}) {
     await flush();
   }
 
+  const fakeDocument = {
+    visibilityState: 'visible',
+    __ppObservers: [],
+    __ppHosts: [],
+    querySelectorAll() {
+      return [...this.__ppHosts];
+    },
+    addEventListener(type, fn, capture) {
+      if (type === 'error') {
+        // 资源加载失败的 error 不冒泡，只走捕获阶段 —— 挂错了整块功能静默失效
+        assert.equal(capture, true, 'error 监听必须用捕获阶段，否则永远收不到');
+        onError = fn;
+        return;
+      }
+      docHandlers[type] = fn;
+    },
+  };
+
   const sandbox = {
     console,
     setTimeout: (fn, ms) => {
@@ -145,18 +209,8 @@ function mount(respond, options = {}) {
     clearTimeout: (id) => timers.delete(id),
     URL,
     Date,
-    document: {
-      visibilityState: 'visible',
-      addEventListener(type, fn, capture) {
-        if (type === 'error') {
-          // 资源加载失败的 error 不冒泡，只走捕获阶段 —— 挂错了整块功能静默失效
-          assert.equal(capture, true, 'error 监听必须用捕获阶段，否则永远收不到');
-          onError = fn;
-          return;
-        }
-        docHandlers[type] = fn;
-      },
-    },
+    MutationObserver: FakeMutationObserver,
+    document: fakeDocument,
     chrome: {
       runtime: {
         lastError: undefined,
@@ -194,6 +248,22 @@ function mount(respond, options = {}) {
     fn({ target });
   };
 
+  /**
+   * 模拟一个 open shadow root 被挂到 document 下。
+   * 真实 ComicRead 是先 append host、再 attachShadow；MutationObserver 回调
+   * 在下一个任务才跑，所以这里也异步通知。
+   */
+  async function addShadowHost() {
+    const created = createShadowHost();
+    queueMicrotask(() => {
+      for (const observer of fakeDocument.__ppObservers) {
+        observer.callback([{ addedNodes: [created.host] }]);
+      }
+    });
+    await flush();
+    return created;
+  }
+
   return {
     sent,
     /** 触发一次资源加载失败并等它处理完（含重发前的短等待） */
@@ -211,6 +281,18 @@ function mount(respond, options = {}) {
     },
     /** 触发一次 document 捕获阶段的事件（loadstart / load / abort） */
     fireDoc,
+    /** 新挂一个 open shadow root，返回 {host, shadow}（模拟 MutationObserver 已交付） */
+    addShadowHost,
+    /** 触发挂在 shadow root 上的捕获监听 */
+    fireShadow(root, type, target) {
+      for (const fn of root.__ppHandlers[type] ?? []) fn({ target });
+    },
+    /** 让 shadow root 里的图片失败并等处理完 */
+    async failShadow(root, target) {
+      const done = (root.__ppHandlers.error ?? []).map((fn) => fn({ target }));
+      await autoAdvance();
+      await Promise.all(done.filter(Boolean));
+    },
     start: (target) => fireDoc('loadstart', target),
     loaded: (target) => fireDoc('load', target),
     aborted: (target) => fireDoc('abort', target),
@@ -348,6 +430,34 @@ test('自己换节点触发的旧请求 abort/error 不再多问一次', async (
   assert.equal(el.srcWrites.length, 1);
 
   page.start(el); // 新请求正式开始
+});
+
+// ---------------------------------------------------------------- open shadow root
+
+test('新挂载的 open shadow root 会被接管：内部慢图超过阈值触发看门狗', async () => {
+  const page = mount(alwaysRetry, { watchdogMs: 1000 });
+  const { shadow } = await page.addShadowHost();
+  const el = img(IMG_URL, { isConnected: true, getRootNode: () => shadow });
+
+  page.fireShadow(shadow, 'loadstart', el);
+  await page.tick(1001);
+
+  assert.equal(page.asks().length, 1, 'shadow root 里的图也要走慢图看门狗');
+  assert.deepEqual(plain(page.asks()[0]),
+    { type: 'imageRetryAsk', url: IMG_URL, attempt: 1, cause: 'slow' });
+  assert.deepEqual(el.srcWrites, [IMG_URL]);
+});
+
+test('open shadow root 内部的裂图会重发 —— 外层 document 看不到内部 img', async () => {
+  const page = mount(alwaysRetry);
+  const { shadow } = await page.addShadowHost();
+  const el = img(IMG_URL, { isConnected: true, getRootNode: () => shadow });
+
+  await page.failShadow(shadow, el);
+
+  assert.equal(page.asks().length, 1);
+  assert.equal(page.asks()[0].via ?? 'img', 'img');
+  assert.deepEqual(el.srcWrites, [IMG_URL]);
 });
 
 // ---------------------------------------------------------------- 重发

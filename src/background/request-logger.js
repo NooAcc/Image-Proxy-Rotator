@@ -30,7 +30,7 @@ import { getConfig, getLogger, queueRuntimeSave, updateConfig } from './state.js
 import { noteRequestMetric, noteRetryMetric } from './metrics-store.js';
 import { dbg } from './debug-store.js';
 import { PROBE_PARAM, FAILURE_TTL_MS, RETRY_ASK_GRACE_MS } from '../lib/constants.js';
-import { classifyFailure, isRetriableKind } from '../lib/retry.js';
+import { classifyFailure, isRetriableAskKind } from '../lib/retry.js';
 
 /** requestId -> {url, startedAt}，用于算耗时 */
 const pending = new Map();
@@ -80,7 +80,8 @@ function noteFailure(url, observed) {
 
 /**
  * 查一个 URL 最近一次失败的原因。
- * @returns {'proxy'|'network'|'origin'|'aborted'|'other'|null} 没记录或已过期时返回 null
+ * @returns {'proxy'|'network'|'origin'|'rate-limit'|'aborted'|'blocked'|'other'|null}
+ *   没记录或已过期时返回 null
  */
 export function observedFailure(url) {
   const record = failures.get(String(url));
@@ -126,7 +127,7 @@ const ASKED_CAP = 300;
  * 换个代理还是 404，页面捕不捕获都无所谓，算进来只会让那一格变成噪音。
  */
 function expectRetryAsk(url, kind) {
-  if (!isRetriableKind(kind)) return;
+  if (!isRetriableAskKind(kind)) return;
   const key = String(url);
 
   // 页面已经就这个地址问过了（它比网络层先到），那就没什么可等的
@@ -370,9 +371,11 @@ export function installRequestLogger() {
       // 连接层面就失败了，没有对端 IP 可归因，但它确实是一次「本该走代理」的请求，
       // 不计入总量会让成功率虚高。responded: false 是为了不让它进「无法归因」——
       // 那一格的含义是「拿到了响应却认不出是哪个节点」，压根没建起连接不算归因失败
+      // blocked（被其他扩展/策略拦下）与 aborted 一样不是代理失败，仍单列「中止/取消」
+      const cancelled = failureKind === 'aborted' || failureKind === 'blocked';
       await noteRequestMetric({
         ok: false,
-        aborted: failureKind === 'aborted',
+        aborted: cancelled,
         nodeId: null,
         ruleId: verdict.rule.id,
         blind: verdict.blind,
@@ -381,13 +384,12 @@ export function installRequestLogger() {
       });
 
       const log = await getLogger();
-      const aborted = failureKind === 'aborted';
       log.add({
-        level: aborted ? 'info' : 'error',
+        level: cancelled ? 'info' : 'error',
         kind: 'request',
         ok: false,
         url: details.url,
-        message: aborted
+        message: cancelled
           ? `请求已中止：${details.error} ${shorten(details.url)}`
           : `请求失败：${details.error} ${shorten(details.url)}`,
       });

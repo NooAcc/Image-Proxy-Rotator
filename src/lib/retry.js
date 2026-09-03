@@ -57,16 +57,28 @@ const NETWORK_ERRORS = new Set([
   'ERR_NETWORK_CHANGED',
 ]);
 
-/** 主动取消：用户翻页了、别的扩展拦了。重发只会再被取消一次 */
-const ABORTED_ERRORS = new Set([
-  'ERR_ABORTED',
+/**
+ * 请求被中止。页面翻页、预加载被换掉、导航离开都会给这个错误码。
+ *
+ * 它是否值得重发**不能只看网络层**：纯后台观测到的取消（页面已经离开）没有可重发的
+ * 元素，重发只会白造请求；只有内容脚本真的在 `<img>` 上捕获到 error 并来问时，
+ * 才说明用户看着的这张图确实裂了。所以 `aborted` 进 RETRIABLE，但 request-logger
+ * 不会为它启动「页面没捕获」的计时。
+ */
+const ABORTED_ERRORS = new Set(['ERR_ABORTED']);
+
+/** 被其他扩展、企业策略或响应拦下：重发大概率还是被同一层拦掉 */
+const BLOCKED_ERRORS = new Set([
   'ERR_BLOCKED_BY_CLIENT',
   'ERR_BLOCKED_BY_ADMINISTRATOR',
   'ERR_BLOCKED_BY_RESPONSE',
 ]);
 
-/** 可以重试的类别。slow 不是 classifyFailure 的产物，而是看门狗直接传入的“慢”原因。 */
-const RETRIABLE = new Set(['proxy', 'network', 'slow']);
+/**
+ * 可以重试的类别。slow 不是 classifyFailure 的产物，而是看门狗直接传入的“慢”原因。
+ * rate-limit = 图源返回 HTTP 429：换出口 IP 正是这个扩展存在的理由。
+ */
+const RETRIABLE = new Set(['proxy', 'network', 'slow', 'rate-limit', 'aborted']);
 
 /** 去掉 `net::` 前缀，拿到裸的错误码 */
 function bareCode(error) {
@@ -78,7 +90,7 @@ function bareCode(error) {
  *
  * @param {{error?: string, statusCode?: number}|null} observed
  *   `onErrorOccurred` 给 error，`onCompleted` 给 statusCode；两者都没有就是没观测到
- * @returns {'proxy'|'network'|'origin'|'aborted'|'other'|'ok'|'unknown'}
+ * @returns {'proxy'|'network'|'origin'|'rate-limit'|'aborted'|'blocked'|'other'|'ok'|'unknown'}
  */
 export function classifyFailure(observed) {
   if (!observed || typeof observed !== 'object') return 'unknown';
@@ -88,11 +100,14 @@ export function classifyFailure(observed) {
     if (PROXY_ERRORS.has(code)) return 'proxy';
     if (NETWORK_ERRORS.has(code)) return 'network';
     if (ABORTED_ERRORS.has(code)) return 'aborted';
+    if (BLOCKED_ERRORS.has(code)) return 'blocked';
     return 'other';
   }
 
   const status = Number(observed.statusCode);
   if (!Number.isFinite(status) || status <= 0) return 'unknown';
+  // 429 看着像站点的错，实际是“这个出口 IP 请求太密了”—— 换一个出口正是解药
+  if (status === 429) return 'rate-limit';
   // 407 看着像站点的错，实际是代理要求认证而没谈成 —— 换一个代理是有意义的
   if (status === 407) return 'proxy';
   if (status >= 400) return 'origin';
@@ -102,6 +117,17 @@ export function classifyFailure(observed) {
 /** 这个类别值不值得换个代理重发 */
 export function isRetriableKind(kind) {
   return RETRIABLE.has(kind);
+}
+
+/**
+ * 网络层失败是否值得启动「页面没捕获」的宽限计时。
+ *
+ * aborted 特殊：页面若还活着、能在 `<img>` 上捕获到 error，后台会收到询问并正常重试；
+ * 但后台单独看到 ERR_ABORTED 时，绝大多数是翻页/关页的取消 —— 那格要数的是
+ * “重试对这个站点是否整体无效”的结构性盲区，取消不是盲区。
+ */
+export function isRetriableAskKind(kind) {
+  return isRetriableKind(kind) && kind !== 'aborted';
 }
 
 /** 把脏输入夹成 ≥1 的整数 */

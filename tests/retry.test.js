@@ -5,7 +5,8 @@
  * 逐条钉死，而不是靠在浏览器里刷漫画页去猜。
  *
  * 两条最容易写错、且写错了不会报错只会浪费流量的规则：
- *   1. **HTTP 4xx / 5xx 绝不重试**（决策 D22）—— 换一个代理拿到的还是同一个 404。
+ *   1. **HTTP 4xx / 5xx 不重试，HTTP 429 例外**（决策 D22）——
+ *      换一个代理拿到的还是同一个 404，但 429 正是“出口 IP 太密”，换出口有意义。
  *   2. **查不到失败原因时保守放弃** —— `onErrorOccurred` 与渲染进程派发 `error` 之间
  *      没有顺序保证，宁可少救一张图，也不要把每张裂图都重刷三遍。
  */
@@ -13,7 +14,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyFailure, isRetriableKind, decideRetry } from '../src/lib/retry.js';
+import {
+  classifyFailure,
+  isRetriableKind,
+  isRetriableAskKind,
+  decideRetry,
+} from '../src/lib/retry.js';
 
 /** decideRetry 的默认入参，逐条测试只覆盖自己关心的那个字段 */
 const base = {
@@ -61,11 +67,17 @@ test('连接层错误码归为 network，走代理时这些多半是代理侧的
   assert.equal(isRetriableKind('network'), true);
 });
 
-test('HTTP 4xx / 5xx 归为 origin，不可重试', () => {
+test('HTTP 4xx / 5xx（429 除外）归为 origin，不可重试', () => {
   for (const statusCode of [400, 403, 404, 410, 500, 502, 503, 504]) {
     assert.equal(classifyFailure({ statusCode }), 'origin', `${statusCode}`);
   }
   assert.equal(isRetriableKind('origin'), false);
+});
+
+test('HTTP 429 是站点限流，换一个出口 IP 再取一次是有意义的', () => {
+  assert.equal(classifyFailure({ statusCode: 429 }), 'rate-limit');
+  assert.equal(isRetriableKind('rate-limit'), true);
+  assert.equal(decideRetry({ ...base, kind: 'rate-limit', attempt: 1 }).action, 'retry');
 });
 
 test('407 是代理要求认证，归为 proxy 而不是 origin', () => {
@@ -73,10 +85,28 @@ test('407 是代理要求认证，归为 proxy 而不是 origin', () => {
   assert.equal(classifyFailure({ statusCode: 407 }), 'proxy');
 });
 
-test('用户或其他扩展取消的请求归为 aborted，不可重试', () => {
+test('ERR_ABORTED 归为 aborted；页面仍能捕获到图片失败时允许重试', () => {
   assert.equal(classifyFailure({ error: 'net::ERR_ABORTED' }), 'aborted');
-  assert.equal(classifyFailure({ error: 'net::ERR_BLOCKED_BY_CLIENT' }), 'aborted');
-  assert.equal(isRetriableKind('aborted'), false);
+  assert.equal(isRetriableKind('aborted'), true);
+  assert.equal(isRetriableAskKind('aborted'), false,
+    '纯导航取消不该触发后台的「页面没捕获」计时 —— 那格是结构性盲区，不是取消');
+  assert.equal(decideRetry({ ...base, kind: 'aborted', attempt: 1 }).action, 'retry');
+});
+
+test('代理故障与 429 都值得等待页面来问，进 unseen 计时', () => {
+  assert.equal(isRetriableAskKind('proxy'), true);
+  assert.equal(isRetriableAskKind('rate-limit'), true);
+});
+
+test('被其他扩展、策略或响应拦下的请求归为 blocked，不可重试', () => {
+  for (const error of [
+    'net::ERR_BLOCKED_BY_CLIENT',
+    'net::ERR_BLOCKED_BY_ADMINISTRATOR',
+    'net::ERR_BLOCKED_BY_RESPONSE',
+  ]) {
+    assert.equal(classifyFailure({ error }), 'blocked', error);
+  }
+  assert.equal(isRetriableKind('blocked'), false);
 });
 
 test('没见过的错误码归为 other，保守不重试', () => {
@@ -138,9 +168,9 @@ test('URL 不匹配任何规则时完全不干预', () => {
 
 test('失败原因不是代理故障时不重试，理由能区分开', () => {
   assert.equal(decideRetry({ ...base, kind: 'origin' }).reason, 'not-proxy-failure');
-  assert.equal(decideRetry({ ...base, kind: 'aborted' }).reason, 'not-proxy-failure');
+  assert.equal(decideRetry({ ...base, kind: 'blocked' }).reason, 'not-proxy-failure');
   assert.equal(decideRetry({ ...base, kind: 'unknown' }).reason, 'unknown-cause');
-  for (const kind of ['origin', 'aborted', 'unknown']) {
+  for (const kind of ['origin', 'blocked', 'unknown']) {
     assert.equal(decideRetry({ ...base, kind }).action, 'give-up');
   }
 });
