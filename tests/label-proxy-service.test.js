@@ -75,7 +75,7 @@ test('POST /api/convert 启动标签中继并返回可写回扩展的节点', as
   const upB = createEchoServer('UP-B:');
   const relayPort = await freePort();
   const service = await startLabelService({
-    local: { baseAddress: '127.0.0.2', port: relayPort },
+    local: { baseAddress: '127.0.10.2', port: relayPort },
     service: { host: '127.0.0.1', port: 0 },
   });
 
@@ -89,11 +89,11 @@ test('POST /api/convert 启动标签中继并返回可写回扩展的节点', as
 
     assert.equal(result.status, 200);
     assert.equal(result.body.ok, true);
-    assert.deepEqual(result.body.nodes.map((n) => n.host), ['127.0.0.2', '127.0.0.3']);
+    assert.deepEqual(result.body.nodes.map((n) => n.host), ['127.0.10.2', '127.0.10.3']);
     assert.equal(result.body.nodes[0].upstreamPort, await upA.port);
     assert.equal(result.body.nodes[1].upstreamPort, await upB.port);
-    assert.equal(await roundTrip('127.0.0.2', relayPort), 'UP-A:ping');
-    assert.equal(await roundTrip('127.0.0.3', relayPort), 'UP-B:ping');
+    assert.equal(await roundTrip('127.0.10.2', relayPort), 'UP-A:ping');
+    assert.equal(await roundTrip('127.0.10.3', relayPort), 'UP-B:ping');
   } finally {
     await service.close();
     await closeServer(upA.server);
@@ -103,7 +103,7 @@ test('POST /api/convert 启动标签中继并返回可写回扩展的节点', as
 
 test('GET /api/status 返回服务状态', async () => {
   const service = await startLabelService({
-    local: { baseAddress: '127.0.0.2', port: await freePort() },
+    local: { baseAddress: '127.0.10.2', port: await freePort() },
     service: { host: '127.0.0.1', port: 0 },
   });
   try {
@@ -119,7 +119,7 @@ test('GET /api/status 返回服务状态', async () => {
 
 test('配置 token 后 /api/convert 要求 Bearer 认证', async () => {
   const service = await startLabelService({
-    local: { baseAddress: '127.0.0.2', port: await freePort() },
+    local: { baseAddress: '127.0.10.2', port: await freePort() },
     service: { host: '127.0.0.1', port: 0, token: 'secret' },
   });
   try {
@@ -138,7 +138,7 @@ test('配置 token 后 /api/convert 要求 Bearer 认证', async () => {
 
 test('非法 upstreams 返回 400 而不是 500', async () => {
   const service = await startLabelService({
-    local: { baseAddress: '127.0.0.2', port: await freePort() },
+    local: { baseAddress: '127.0.10.2', port: await freePort() },
     service: { host: '127.0.0.1', port: 0 },
   });
   try {

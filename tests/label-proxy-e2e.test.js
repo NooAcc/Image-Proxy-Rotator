@@ -64,7 +64,7 @@ test('真实 HTTP 服务 + easy_proxies 同步：自动转换并写回可用的�
   const upstream = createEchoServer('UP:');
   const relayPort = await freePort();
   const service = await startLabelService({
-    local: { baseAddress: '127.0.0.2', port: relayPort },
+    local: { baseAddress: '127.0.20.2', port: relayPort },
     service: { host: '127.0.0.1', port: 0 },
   });
 
@@ -119,10 +119,10 @@ test('真实 HTTP 服务 + easy_proxies 同步：自动转换并写回可用的�
     const cfg = await getConfig();
     assert.equal(result.added, 1);
     assert.equal(cfg.nodes.length, 1);
-    assert.equal(cfg.nodes[0].host, '127.0.0.2');
+    assert.equal(cfg.nodes[0].host, '127.0.20.2');
     assert.equal(cfg.nodes[0].meta.labelProxy.upstreamPort, await upstream.port);
     assert.equal(cfg.settings.easyProxies.lastSyncError, null);
-    assert.equal(await roundTrip('127.0.0.2', relayPort), 'UP:ping');
+    assert.equal(await roundTrip('127.0.20.2', relayPort), 'UP:ping');
   } finally {
     await service.close();
     await closeServer(upstream.server);
