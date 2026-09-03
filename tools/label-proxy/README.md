@@ -13,6 +13,9 @@
 
 工具只做**透明 TCP 转发**，不解析 HTTP/CONNECT，也不要求修改扩展代码。
 
+扩展可以自动联动：在 Easy Proxies 设置里填上本工具的 HTTP 服务地址后，
+每次拉取 easy_proxies 都会自动转换并写回标签节点，见下文「与扩展自动联动」。
+
 ## 它不能做什么
 
 - 不改变上游代理的真实出口 IP。如果同一台代理机的不同端口本来就对应不同出口，
@@ -42,6 +45,11 @@ cp tools/label-proxy/config.example.json tools/label-proxy/config.json
     "baseAddress": "127.0.0.2",
     "port": 8080
   },
+  "service": {
+    "host": "127.0.0.1",
+    "port": 19091,
+    "token": ""
+  },
   "upstreams": [
     { "name": "节点 A", "host": "10.0.0.3", "port": 24000 },
     { "name": "节点 B", "host": "10.0.0.3", "port": 24001 }
@@ -51,6 +59,8 @@ cp tools/label-proxy/config.example.json tools/label-proxy/config.json
 
 - `local.baseAddress`：第一个标签地址，之后按 `127.0.0.3`、`127.0.0.4`… 自动递增。
 - `local.port`：所有标签共用同一个本地端口（不同 IP 可以共用端口）。
+- `service`：可选 HTTP 服务。`port` 是扩展要填的地址；`token` 留空表示不需要认证，
+  配置后扩展的“本地标签服务口令”必须填同一个值。
 - `upstreams`：原节点列表，`name` 会保留为扩展节点名。
 
 ## 启动
@@ -72,12 +82,32 @@ http://127.0.0.2:8080#节点 A
 http://127.0.0.3:8080#节点 B
 ```
 
+## 与扩展自动联动
+
+1. 在 `config.json` 填好 `service` 后启动：
+
+   ```bash
+   node tools/label-proxy/cli.mjs --config tools/label-proxy/config.json
+   ```
+
+2. 打开扩展设置页「Easy Proxies 自动拉取」：
+   - 照旧填 easy_proxies 管理地址、密码、条数与同步间隔；
+   - “本地标签服务地址”填 `http://127.0.0.1:19091`（与实际 `service.port` 一致）；
+   - 工具配了 `service.token` 时，把同一个口令填进“本地标签服务口令”。
+3. 点「立即拉取并同步」。流程：拉取 easy_proxies → `POST /api/convert` →
+   工具分配 `127.0.0.x` 并启动中继 → 扩展用标签节点替换旧自动节点 → 重新注入 PAC。
+4. 启动时/定时同步走同一条链路，之后统计面板即可按端口归因。
+
+工具没启动或转换失败时，同步会报错且不清空现有节点。想退回原始行为，
+把“本地标签服务地址”留空再同步一次即可。
+
 ## 在扩展中使用
 
 1. 先启动本工具，保持运行。
 2. 在设置页「节点 → 批量导入」粘贴 `--print-nodes` 的输出。
 3. **删除或禁用原来的原始同 IP 节点**，否则它们仍会参与轮询并继续产生无法归因的流量。
-4. 如果开着「Easy Proxies 自动拉取」，先关闭它；自动同步会把原始同 IP 节点重新加回列表。
+4. 如果开着「Easy Proxies 自动拉取」，优先使用上面的自动联动；不使用联动时请先关闭它，
+   否则自动同步会把原始同 IP 节点重新加回列表。
 5. 正常测速与使用。由于每个节点 host 是唯一回环地址，统计面板会恢复按节点归因。
 
 上游要求账号密码时，把凭据按扩展格式填进标签节点（如
@@ -90,7 +120,7 @@ http://127.0.0.3:8080#节点 B
 ## 验证
 
 ```bash
-node --test tests/label-proxy-config.test.js tests/label-proxy-relay.test.js tests/label-proxy-cli.test.js
+node --test tests/label-proxy-config.test.js tests/label-proxy-relay.test.js tests/label-proxy-cli.test.js tests/label-proxy-service.test.js
 ```
 
 测试会用真实回环地址启动两个标签 listener，并断言各自只转发到对应的上游。

@@ -60,6 +60,7 @@ function makeEvent(bucket) {
  * 安装替身到 globalThis，返回可供断言与调整的把手。
  */
 export function installChromeStub() {
+  const originalFetch = globalThis.fetch;
   const local = makeArea('local', (changes, area) => dispatchStorageChange(changes, area));
   const session = makeArea('session', (changes, area) => dispatchStorageChange(changes, area));
 
@@ -192,6 +193,7 @@ export function installChromeStub() {
     alarms,
     listeners,
     fetchCalls,
+    realFetch: (...args) => originalFetch(...args),
     registeredScripts,
     scriptingCalls,
 
