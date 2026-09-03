@@ -47,7 +47,7 @@ cp tools/label-proxy/config.example.json tools/label-proxy/config.json
   },
   "service": {
     "host": "127.0.0.1",
-    "port": 19091,
+    "port": 19191,
     "token": ""
   },
   "upstreams": [
@@ -92,7 +92,7 @@ http://127.0.0.3:8080#节点 B
 
 2. 打开扩展设置页「Easy Proxies 自动拉取」：
    - 照旧填 easy_proxies 管理地址、密码、条数与同步间隔；
-   - “本地标签服务地址”填 `http://127.0.0.1:19091`（与实际 `service.port` 一致）；
+   - “本地标签服务地址”填 `http://127.0.0.1:19191`（与实际 `service.port` 一致）；
    - 工具配了 `service.token` 时，把同一个口令填进“本地标签服务口令”。
 3. 点「立即拉取并同步」。流程：拉取 easy_proxies → `POST /api/convert` →
    工具分配 `127.0.0.x` 并启动中继 → 扩展用标签节点替换旧自动节点 → 重新注入 PAC。

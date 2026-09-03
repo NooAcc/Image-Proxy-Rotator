@@ -260,9 +260,9 @@ test('easyProxies 管理地址没写 scheme 时自动补 http://', () => {
 
 test('easyProxies 本地标签服务地址没写 scheme 时自动补 http://', () => {
   const ep = normalizeConfig({
-    settings: { easyProxies: { labelServiceUrl: '127.0.0.1:19091' } },
+    settings: { easyProxies: { labelServiceUrl: '127.0.0.1:19191' } },
   }).settings.easyProxies;
-  assert.equal(ep.labelServiceUrl, 'http://127.0.0.1:19091');
+  assert.equal(ep.labelServiceUrl, 'http://127.0.0.1:19191');
 });
 
 test('easyProxies 设置本身是垃圾时回落到默认值', () => {

@@ -130,7 +130,7 @@ test('空节点列表同步成功但不报错、不改动现有节点', async ()
 });
 
 test('空节点列表且配置本地标签服务时跳过转换，不调用 /api/convert', async () => {
-  await seed({ labelServiceUrl: 'http://127.0.0.1:19091' }, {
+  await seed({ labelServiceUrl: 'http://127.0.0.1:19191' }, {
     nodes: [nodeFixture('n_aaaaaa01')],
   });
   stub.setFetch(async (url) => {
@@ -147,7 +147,7 @@ test('空节点列表且配置本地标签服务时跳过转换，不调用 /api
 
 test('runEasyProxiesSync 配置本地标签服务时转换并写回标签节点', async () => {
   await seed({
-    labelServiceUrl: 'http://127.0.0.1:19091',
+    labelServiceUrl: 'http://127.0.0.1:19191',
     labelServiceToken: 'secret',
   }, {
     enabled: true,
@@ -166,7 +166,7 @@ test('runEasyProxiesSync 配置本地标签服务时转换并写回标签节点'
         ],
       });
     }
-    assert.equal(url, 'http://127.0.0.1:19091/api/convert');
+    assert.equal(url, 'http://127.0.0.1:19191/api/convert');
     assert.equal(options.method, 'POST');
     assert.equal(options.headers.Authorization, 'Bearer secret');
     const body = JSON.parse(options.body);
@@ -198,7 +198,7 @@ test('runEasyProxiesSync 配置本地标签服务时转换并写回标签节点'
 
 test('本地标签服务不可用时同步失败且不清空现有自动节点', async () => {
   await seed({
-    labelServiceUrl: 'http://127.0.0.1:19091',
+    labelServiceUrl: 'http://127.0.0.1:19191',
   }, {
     enabled: true,
     nodes: [

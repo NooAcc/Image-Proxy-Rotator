@@ -173,7 +173,7 @@ export async function startLabelService({
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(service.port ?? 19091, service.host ?? '127.0.0.1');
+    server.listen(service.port ?? 19191, service.host ?? '127.0.0.1');
   });
 
   const port = server.address().port;
