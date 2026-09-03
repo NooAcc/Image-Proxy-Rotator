@@ -130,6 +130,11 @@ git clone https://github.com/NooAcc/Image-Proxy-Rotator.git
 **想确认轮询是否均匀，请看代理服务商后台的分端口流量。** 详见
 [docs/LIMITATIONS.md](docs/LIMITATIONS.md) 第 13 节。
 
+如果想让**扩展面板本身**按端口记账，仓库附带一个可选的本地工具
+[`tools/label-proxy`](tools/label-proxy/README.md)：它为每个上游端口分配一个不同的
+本机回环地址（`127.0.0.2`、`127.0.0.3`…），浏览器看到不同的对端 IP 后，现有归因
+就能精确到节点。注意它只解决“面板记账”，不改变上游真实出口 IP。
+
 ---
 
 ## 统计面板
