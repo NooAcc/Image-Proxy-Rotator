@@ -3,6 +3,11 @@
     "baseAddress": "127.0.0.2",
     "port": 8080
   },
+  "service": {
+    "host": "127.0.0.1",
+    "port": 19091,
+    "token": ""
+  },
   "upstreams": [
     {
       "name": "节点 A",

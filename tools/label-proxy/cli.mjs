@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 
 import { buildPlan } from './lib/config.mjs';
 import { startRelays } from './lib/relay.mjs';
+import { startLabelService } from './lib/service.mjs';
 
 export function parseArgv(argv) {
   const args = Array.isArray(argv) ? argv : [];
@@ -56,6 +57,11 @@ function usage() {
 }
 
 export async function loadPlanFromFile(configPath) {
+  const raw = await loadRawConfig(configPath);
+  return buildPlan(raw);
+}
+
+export async function loadRawConfig(configPath) {
   let text;
   try {
     text = await readFile(configPath, 'utf8');
@@ -70,7 +76,7 @@ export async function loadPlanFromFile(configPath) {
     throw new Error(`配置文件不是合法 JSON：${error?.message ?? error}`);
   }
 
-  return buildPlan(raw);
+  return raw;
 }
 
 async function main() {
@@ -88,9 +94,9 @@ async function main() {
     return;
   }
 
-  let plan;
+  let raw;
   try {
-    plan = await loadPlanFromFile(options.configPath);
+    raw = await loadRawConfig(options.configPath);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
@@ -98,27 +104,68 @@ async function main() {
   }
 
   if (options.printNodes) {
+    let plan;
+    try {
+      plan = buildPlan(raw);
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+      return;
+    }
     console.log(plan.importLines.join('\n'));
     return;
   }
 
-  let handle;
-  try {
-    handle = await startRelays(plan, (line) => console.log(line));
-  } catch (error) {
-    console.error(error.message);
-    process.exitCode = 1;
-    return;
+  let stop = async () => process.exit(0);
+
+  if (raw.service && typeof raw.service === 'object') {
+    try {
+      const service = await startLabelService({
+        local: raw.local ?? {},
+        service: raw.service,
+        initialUpstreams: Array.isArray(raw.upstreams) ? raw.upstreams : [],
+        log: (line) => console.log(line),
+      });
+      console.log(`\n本地标签 HTTP 服务已启动：http://${raw.service.host ?? '127.0.0.1'}:${service.port}`);
+      console.log('扩展配置好 Easy Proxies 后，同步会自动调用 /api/convert。');
+      console.log('按 Ctrl+C 停止。');
+      stop = async () => {
+        await service.close();
+        process.exit(0);
+      };
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    let plan;
+    try {
+      plan = buildPlan(raw);
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+      return;
+    }
+    let handle;
+    try {
+      handle = await startRelays(plan, (line) => console.log(line));
+    } catch (error) {
+      console.error(error.message);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log('\n本地标签代理已启动，按 Ctrl+C 停止。');
+    console.log('请在扩展中导入以下节点（若已有原始同 IP 节点请先禁用或删除）：\n');
+    console.log(plan.importLines.map((line) => `  ${line}`).join('\n'));
+
+    stop = async () => {
+      await handle.close();
+      process.exit(0);
+    };
   }
 
-  console.log('\n本地标签代理已启动，按 Ctrl+C 停止。');
-  console.log('请在扩展中导入以下节点（若已有原始同 IP 节点请先禁用或删除）：\n');
-  console.log(plan.importLines.map((line) => `  ${line}`).join('\n'));
-
-  const stop = async () => {
-    await handle.close();
-    process.exit(0);
-  };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 }
