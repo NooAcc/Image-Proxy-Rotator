@@ -8,3 +8,6 @@ dist/
 
 # 真实测试留下的统计与调试日志：含访问过的图片地址与代理服务器地址
 logs/
+
+# label-proxy 后台运行产物（pid 与日志）
+tools/label-proxy/run/

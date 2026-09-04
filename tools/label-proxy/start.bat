@@ -1,9 +1,20 @@
 @echo off
-rem One-click start for label-proxy (same as: npm run label-proxy).
-title Label Proxy - 127.0.0.1:19191
-node "%~dp0cli.mjs" --service
+rem One-click start for label-proxy in the background.
+rem The command window closes after startup; logs go to run\label-proxy.log.
+setlocal
+
+where node >nul 2>&1
 if errorlevel 1 (
   echo.
-  echo Failed to start. Make sure Node.js 18+ is installed and port 19191 is free.
+  echo label-proxy needs Node.js 18 or newer.
   pause
+  exit /b 1
+)
+
+node "%~dp0background.mjs" start
+if errorlevel 1 (
+  echo.
+  echo Background start failed. See run\label-proxy.log for details.
+  pause
+  exit /b 1
 )

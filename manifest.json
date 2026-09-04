@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "漫画图片代理分流",
   "short_name": "图片代理分流",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "把匹配规则的图片请求按轮询分散到多个代理节点，绕过站点的单 IP 速率限制。",
   "minimum_chrome_version": "111",
   "permissions": [

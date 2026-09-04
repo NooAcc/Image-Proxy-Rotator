@@ -16,18 +16,50 @@
 扩展可以自动联动：在 Easy Proxies 设置里填上本工具的 HTTP 服务地址后，
 每次拉取 easy_proxies 都会自动转换并写回标签节点，见下文「与扩展自动联动」。
 
-## 最简单启动
+## 后台启动（推荐）
 
-在项目根目录运行一条命令即可，**不需要任何配置文件**：
+label-proxy 可以完全在后台运行，不占用、也不保留命令行窗口。项目根目录执行：
+
+```bash
+npm run label-proxy:start     # 后台启动
+npm run label-proxy:status    # 查看是否在运行
+npm run label-proxy:stop      # 停止
+npm run label-proxy:restart   # 重启
+```
+
+Windows 也可以不依赖 npm，直接双击本目录下的脚本：
+
+- `start-hidden.vbs`：后台启动，**完全没有命令行窗口**；
+- `stop-hidden.vbs`：停止后台服务；
+- `start.bat`：效果同上，启动窗口会在命令完成后自动关闭。
+
+后台模式启动的是默认 HTTP 服务（等价于 `npm run label-proxy`，即
+`cli.mjs --service`），**不需要任何配置文件**。日志与 pid 写在
+`run/label-proxy.log` 与 `run/label-proxy.pid`；再次运行 start 会检测到服务
+已在运行并跳过，不会重复拉起。
+
+## 登录后自动启动（可选）
+
+希望每次登录 Windows 后自动在后台运行，不需要手动点任何东西：
+
+1. 双击本目录下的 `install-autostart.vbs`；
+2. 下次登录时 label-proxy 会自动后台启动；
+3. 不想自启时双击 `uninstall-autostart.vbs`。
+
+自启只是往「启动」文件夹放一个快捷方式，不写注册表、不需要管理员权限。仓库
+目录被移动后快捷方式会失效，重新双击一次 `install-autostart.vbs` 即可。
+
+## 前台运行（调试）
+
+需要看实时输出或按 Ctrl+C 停止时，仍然可以用前台方式：
 
 ```bash
 npm run label-proxy
 ```
 
-Windows 也可以直接双击本目录下的 `start.bat`，效果相同：它会用默认参数启动
-HTTP 服务，不依赖 npm 或配置文件。
+## 默认服务参数
 
-它会用默认值启动 HTTP 服务：
+后台与前台默认模式都会用下面的默认值启动 HTTP 服务：
 
 - 服务地址：`http://127.0.0.1:19191`
 - 标签起点：`127.0.0.2:8080`（之后自动递增到 `127.0.0.3/4…`）

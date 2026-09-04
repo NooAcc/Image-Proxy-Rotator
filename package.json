@@ -1,6 +1,6 @@
 {
   "name": "image-proxy-rotator",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "漫画图片代理分流：MV3 扩展，把命中规则的图片请求按轮询分散到多个 HTTP/HTTPS 代理节点",
   "private": true,
   "license": "MIT",
@@ -14,6 +14,10 @@
     "test": "node --test tests/*.test.js",
     "check": "node tools/check-manifest.mjs",
     "label-proxy": "node tools/label-proxy/cli.mjs --service",
+    "label-proxy:start": "node tools/label-proxy/background.mjs start",
+    "label-proxy:status": "node tools/label-proxy/background.mjs status",
+    "label-proxy:stop": "node tools/label-proxy/background.mjs stop",
+    "label-proxy:restart": "node tools/label-proxy/background.mjs restart",
     "icons": "node tools/make-icons.mjs",
     "pack": "node tools/pack.mjs",
     "verify": "npm test && npm run check",
